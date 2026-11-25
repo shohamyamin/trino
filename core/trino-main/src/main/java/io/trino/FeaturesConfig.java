@@ -101,6 +101,7 @@ public class FeaturesConfig
      */
     private CompressionCodec exchangeCompressionCodec = NONE;
     private boolean exchangeVectorizedSerdeEnabled = true;
+    private boolean vectorizedArrayVectorFunctionsEnabled = true;
     private boolean pagesIndexEagerCompactionEnabled;
     private int maxRecursionDepth = 10;
 
@@ -365,6 +366,19 @@ public class FeaturesConfig
     public boolean isExchangeVectorizedSerdeEnabled()
     {
         return exchangeVectorizedSerdeEnabled;
+    }
+
+    @Config("experimental.vectorized-array-vector-functions.enabled")
+    @ConfigDescription("Enable using Java Vector API for dot_product, cosine_similarity, cosine_distance and euclidean_distance on CPUs where it is faster")
+    public FeaturesConfig setVectorizedArrayVectorFunctionsEnabled(boolean vectorizedArrayVectorFunctionsEnabled)
+    {
+        this.vectorizedArrayVectorFunctionsEnabled = vectorizedArrayVectorFunctionsEnabled;
+        return this;
+    }
+
+    public boolean isVectorizedArrayVectorFunctionsEnabled()
+    {
+        return vectorizedArrayVectorFunctionsEnabled;
     }
 
     public DataIntegrityVerification getExchangeDataIntegrityVerification()

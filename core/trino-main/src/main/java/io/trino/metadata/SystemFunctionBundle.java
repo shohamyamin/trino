@@ -181,6 +181,7 @@ import io.trino.operator.scalar.TypeOfFunction;
 import io.trino.operator.scalar.UrlFunctions;
 import io.trino.operator.scalar.VarbinaryFunctions;
 import io.trino.operator.scalar.VarcharMethods;
+import io.trino.operator.scalar.VectorizedArrayVectorFunctions;
 import io.trino.operator.scalar.VersionFunction;
 import io.trino.operator.scalar.WilsonInterval;
 import io.trino.operator.scalar.WordStemFunction;
@@ -402,6 +403,11 @@ public final class SystemFunctionBundle
 
     public static FunctionBundle create(FeaturesConfig featuresConfig, TypeOperators typeOperators, BlockTypeOperators blockTypeOperators, NodeVersion nodeVersion)
     {
+        Class<?> arrayVectorFunctions = ArrayVectorFunctions.class;
+        if (featuresConfig.isVectorizedArrayVectorFunctionsEnabled() && VectorizedArrayVectorFunctions.isSupported()) {
+            arrayVectorFunctions = VectorizedArrayVectorFunctions.class;
+        }
+
         InternalFunctionBundleBuilder builder = InternalFunctionBundle.builder()
                 .window(RowNumberFunction.class)
                 .window(RankFunction.class)
@@ -546,7 +552,7 @@ public final class SystemFunctionBundle
                 .scalar(ArrayContainsSequence.class)
                 .scalar(ArrayFilterFunction.class)
                 .scalar(ArrayPositionFunction.class)
-                .scalars(ArrayVectorFunctions.class)
+                .scalars(arrayVectorFunctions)
                 .scalars(CombineHashFunction.class)
                 .scalars(JsonOperators.class)
                 .scalars(FailureFunction.class)
