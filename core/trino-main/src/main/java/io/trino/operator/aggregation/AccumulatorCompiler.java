@@ -52,6 +52,7 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -148,6 +149,22 @@ public final class AccumulatorCompiler
         CallSiteBinder callSiteBinder = new CallSiteBinder();
 
         List<AccumulatorStateDescriptor<?>> stateDescriptors = implementation.getAccumulatorStateDescriptors();
+        MethodHandle inputFunction = implementation.getInputFunction();
+        Optional<MethodHandle> combineFunction = implementation.getCombineFunction();
+        MethodHandle outputFunction = implementation.getOutputFunction();
+        if (!grouped) {
+            // Grouped states are not cast: the inlining of their larger accessors depends on call site frequencies
+            // rather than on the receiver type, and the casts were measured to make grouped aggregations slower
+            List<Class<?>> stateClasses = singleStateClasses(stateDescriptors);
+            List<Class<?>> combineStateClasses = ImmutableList.<Class<?>>builder()
+                    .addAll(stateClasses)
+                    .addAll(stateClasses)
+                    .build();
+            inputFunction = castStateArguments(inputFunction, stateClasses);
+            combineFunction = combineFunction.map(function -> castStateArguments(function, combineStateClasses));
+            outputFunction = castStateArguments(outputFunction, stateClasses);
+        }
+
         List<StateFieldAndDescriptor> stateFieldAndDescriptors = new ArrayList<>();
         for (int i = 0; i < stateDescriptors.size(); i++) {
             stateFieldAndDescriptors.add(new StateFieldAndDescriptor(
@@ -185,7 +202,7 @@ public final class AccumulatorCompiler
                 stateFields,
                 argumentNullable,
                 lambdaProviderFields,
-                implementation.getInputFunction(),
+                inputFunction,
                 callSiteBinder,
                 grouped);
         generateGetEstimatedSize(definition, stateFields);
@@ -198,7 +215,7 @@ public final class AccumulatorCompiler
                 definition,
                 stateFieldAndDescriptors,
                 lambdaProviderFields,
-                implementation.getCombineFunction(),
+                combineFunction,
                 callSiteBinder,
                 grouped);
 
@@ -210,10 +227,10 @@ public final class AccumulatorCompiler
         }
 
         if (grouped) {
-            generateGroupedEvaluateFinal(definition, stateFields, implementation.getOutputFunction(), callSiteBinder);
+            generateGroupedEvaluateFinal(definition, stateFields, outputFunction, callSiteBinder);
         }
         else {
-            generateEvaluateFinal(definition, "evaluateFinal", stateFields, implementation.getOutputFunction(), callSiteBinder);
+            generateEvaluateFinal(definition, "evaluateFinal", stateFields, outputFunction, callSiteBinder);
         }
 
         if (grouped) {
@@ -288,16 +305,17 @@ public final class AccumulatorCompiler
                 lambdaProviderFields);
 
         // Generate methods
+        List<Class<?>> stateClasses = singleStateClasses(stateDescriptors);
         generateCopy(definition, WindowAccumulator.class);
         generateAddInputWindowIndex(
                 definition,
                 stateFields,
                 argumentNullable,
                 lambdaProviderFields,
-                implementation.getInputFunction(),
+                castStateArguments(implementation.getInputFunction(), stateClasses),
                 callSiteBinder);
 
-        generateEvaluateFinal(definition, "output", stateFields, implementation.getOutputFunction(), callSiteBinder);
+        generateEvaluateFinal(definition, "output", stateFields, castStateArguments(implementation.getOutputFunction(), stateClasses), callSiteBinder);
         generateGetEstimatedSize(definition, stateFields);
 
         Class<? extends WindowAccumulator> windowAccumulatorClass = defineHiddenClass(definition, WindowAccumulator.class, callSiteBinder.getClassData());
@@ -782,6 +800,36 @@ public final class AccumulatorCompiler
             BytecodeExpression state = scope.getThis().getField(stateField);
             block.append(state.invoke("setGroupId", void.class, groupIds.getElement(position)));
         }
+    }
+
+    private static List<Class<?>> singleStateClasses(List<AccumulatorStateDescriptor<?>> stateDescriptors)
+    {
+        ImmutableList.Builder<Class<?>> stateClasses = ImmutableList.builder();
+        for (AccumulatorStateDescriptor<?> stateDescriptor : stateDescriptors) {
+            stateClasses.add(stateDescriptor.getFactory().createSingleState().getClass());
+        }
+        return stateClasses.build();
+    }
+
+    /**
+     * Casts the leading state arguments of the function to the classes of the states created by the state factories,
+     * when those classes are final, while keeping the type of the function. The state accessors are interface calls,
+     * so without the casts the compiler binds them statically only if it happened to profile a single receiver class,
+     * which depends on compilation timing and makes the performance of an aggregation vary between JVM runs.
+     */
+    private static MethodHandle castStateArguments(MethodHandle function, List<Class<?>> stateClasses)
+    {
+        MethodType exactType = function.type();
+        for (int argument = 0; argument < stateClasses.size(); argument++) {
+            Class<?> stateClass = stateClasses.get(argument);
+            if (Modifier.isFinal(stateClass.getModifiers()) && exactType.parameterType(argument).isAssignableFrom(stateClass)) {
+                exactType = exactType.changeParameterType(argument, stateClass);
+            }
+        }
+        if (exactType.equals(function.type())) {
+            return function;
+        }
+        return MethodHandles.explicitCastArguments(function, exactType).asType(function.type());
     }
 
     private static MethodDefinition declareAddIntermediate(ClassDefinition definition, boolean grouped)
