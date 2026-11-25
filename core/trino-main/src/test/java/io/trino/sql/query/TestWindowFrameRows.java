@@ -39,6 +39,53 @@ public class TestWindowFrameRows
     }
 
     @Test
+    public void testSlidingVariance()
+    {
+        assertThat(assertions.query(
+                "SELECT i, variance(x) OVER w, var_pop(x) OVER w, stddev_pop(x) OVER w " +
+                        "FROM (VALUES (1, 1e0), (2, 3e0), (3, 7e0), (4, 7e0), (5, 10e0)) t(i, x) " +
+                        "WINDOW w AS (ORDER BY i ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"))
+                .matches("VALUES " +
+                        "(1, CAST(null AS double), 0e0, 0e0), " +
+                        "(2, 2e0, 1e0, 1e0), " +
+                        "(3, 8e0, 4e0, 2e0), " +
+                        "(4, 0e0, 0e0, 0e0), " +
+                        "(5, 4.5e0, 2.25e0, 1.5e0)");
+
+        assertThat(assertions.query(
+                "SELECT i, stddev(x) OVER (ORDER BY i ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) " +
+                        "FROM (VALUES (1, BIGINT '1'), (2, BIGINT '3'), (3, BIGINT '7'), (4, BIGINT '7'), (5, BIGINT '10')) t(i, x)"))
+                .matches("VALUES (1, CAST(null AS double)), (2, sqrt(2e0)), (3, sqrt(8e0)), (4, 0e0), (5, sqrt(4.5e0))");
+
+        // the frame is re-aggregated after a non-finite value leaves it, and nulls are ignored
+        assertThat(assertions.query(
+                "SELECT i, variance(x) OVER (ORDER BY i ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) " +
+                        "FROM (VALUES (1, 1e0), (2, nan()), (3, 5e0), (4, 9e0), (5, infinity()), (6, CAST(null AS double)), (7, 2e0), (8, 4e0)) t(i, x)"))
+                .matches("VALUES " +
+                        "(1, CAST(null AS double)), " +
+                        "(2, nan()), " +
+                        "(3, nan()), " +
+                        "(4, 8e0), " +
+                        "(5, nan()), " +
+                        "(6, CAST(null AS double)), " +
+                        "(7, CAST(null AS double)), " +
+                        "(8, 2e0)");
+    }
+
+    @Test
+    public void testSlidingStandardDeviationMatchesAggregation()
+    {
+        // a large mean and a small spread stress the numerical stability of removing rows from the frame
+        assertThat(assertions.query(
+                "WITH data AS (SELECT i, 1e6 + 3 * sin(i) AS x FROM UNNEST(sequence(1, 5000)) t(i)), " +
+                        "sliding AS (SELECT i, stddev(x) OVER (ORDER BY i ROWS BETWEEN 99 PRECEDING AND CURRENT ROW) AS deviation FROM data), " +
+                        "aggregated AS (SELECT d1.i, stddev(d2.x) AS deviation FROM data d1 JOIN data d2 ON d2.i BETWEEN d1.i - 99 AND d1.i GROUP BY d1.i) " +
+                        "SELECT count(*) FROM sliding JOIN aggregated USING (i) " +
+                        "WHERE NOT (abs(sliding.deviation - aggregated.deviation) <= 1e-9 * aggregated.deviation OR (sliding.deviation IS NULL AND aggregated.deviation IS NULL))"))
+                .matches("VALUES BIGINT '0'");
+    }
+
+    @Test
     public void testOffsetTypes()
     {
         String expected = "VALUES " +

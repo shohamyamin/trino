@@ -242,7 +242,7 @@ public final class AccumulatorCompiler
     {
         var windowAccumulator = implementation.getWindowAccumulator();
         if (windowAccumulator.isPresent()) {
-            return createWindowAccumulatorFactory(windowAccumulator.get());
+            return createWindowAccumulatorFactory(windowAccumulator.get(), boundSignature);
         }
 
         // change types used in Aggregation methods to types used in the core Trino engine to simplify code generation
@@ -301,19 +301,33 @@ public final class AccumulatorCompiler
         generateGetEstimatedSize(definition, stateFields);
 
         Class<? extends WindowAccumulator> windowAccumulatorClass = defineHiddenClass(definition, WindowAccumulator.class, callSiteBinder.getClassData());
-        return createWindowAccumulatorFactory(windowAccumulatorClass);
+        return createWindowAccumulatorFactory(windowAccumulatorClass, boundSignature);
     }
 
     /**
      * @return a factory for window accumulators with provided lambda parameter providers
      */
-    private static Function<List<Supplier<Object>>, WindowAccumulator> createWindowAccumulatorFactory(Class<? extends WindowAccumulator> windowAccumulator)
+    private static Function<List<Supplier<Object>>, WindowAccumulator> createWindowAccumulatorFactory(Class<? extends WindowAccumulator> windowAccumulator, BoundSignature boundSignature)
     {
         try {
             var constructor = windowAccumulator.getConstructor(List.class);
             return lambdaProviders -> {
                 try {
                     return constructor.newInstance(lambdaProviders);
+                }
+                catch (ReflectiveOperationException e) {
+                    throw new RuntimeException(e);
+                }
+            };
+        }
+        catch (ReflectiveOperationException _) {
+        }
+
+        try {
+            var constructor = windowAccumulator.getConstructor(BoundSignature.class);
+            return _ -> {
+                try {
+                    return constructor.newInstance(boundSignature);
                 }
                 catch (ReflectiveOperationException e) {
                     throw new RuntimeException(e);
@@ -336,7 +350,7 @@ public final class AccumulatorCompiler
         }
         catch (ReflectiveOperationException _) {
         }
-        throw new RuntimeException(format("Window accumulator class %s does not have a constructor with a single List argument or a no-argument constructor", windowAccumulator.getName()));
+        throw new RuntimeException(format("Window accumulator class %s does not have a constructor with a single List or BoundSignature argument or a no-argument constructor", windowAccumulator.getName()));
     }
 
     private static void generateWindowAccumulatorConstructor(

@@ -32,6 +32,7 @@ import io.trino.spi.function.AccumulatorStateSerializer;
 import io.trino.spi.function.AggregationFunction;
 import io.trino.spi.function.AggregationImplementation.AccumulatorStateDescriptor;
 import io.trino.spi.function.AggregationState;
+import io.trino.spi.function.BoundSignature;
 import io.trino.spi.function.CombineFunction;
 import io.trino.spi.function.FunctionDependencies;
 import io.trino.spi.function.InOut;
@@ -187,7 +188,7 @@ public final class AggregationFromAnnotationsParser
                 aggregationAnnotation.isOrderSensitive(),
                 aggregationAnnotation.hidden(),
                 aggregationDefinition.getAnnotationsByType(Deprecated.class).length > 0,
-                getWindowAccumulator(aggregationAnnotation));
+                getWindowAccumulator(aggregationAnnotation, outputFunction));
     }
 
     private static String getName(AggregationFunction aggregationAnnotation, AnnotatedElement outputFunction)
@@ -208,9 +209,13 @@ public final class AggregationFromAnnotationsParser
         return ImmutableSet.copyOf(aggregationAnnotation.alias());
     }
 
-    private static Optional<Class<? extends WindowAccumulator>> getWindowAccumulator(AggregationFunction aggregationAnnotation)
+    private static Optional<Class<? extends WindowAccumulator>> getWindowAccumulator(AggregationFunction aggregationAnnotation, AnnotatedElement outputFunction)
     {
         Class<? extends WindowAccumulator> windowAccumulator = aggregationAnnotation.windowAccumulator();
+        AggregationFunction annotation = outputFunction.getAnnotation(AggregationFunction.class);
+        if (annotation != null && !annotation.windowAccumulator().equals(WindowAccumulator.class)) {
+            windowAccumulator = annotation.windowAccumulator();
+        }
         if (windowAccumulator.equals(WindowAccumulator.class)) {
             return Optional.empty();
         }
@@ -220,8 +225,8 @@ public final class AggregationFromAnnotationsParser
         boolean hasValidConstructor = Arrays.stream(windowAccumulator.getConstructors())
                 .map(Constructor::getParameterTypes)
                 .map(List::of)
-                .anyMatch(parameters -> parameters.isEmpty() || parameters.equals(List.of(List.class)));
-        checkArgument(hasValidConstructor, "Window accumulator must have a public no-arg constructor or a constructor with a single List parameter: %s", windowAccumulator);
+                .anyMatch(parameters -> parameters.isEmpty() || parameters.equals(List.of(List.class)) || parameters.equals(List.of(BoundSignature.class)));
+        checkArgument(hasValidConstructor, "Window accumulator must have a public no-arg constructor, or a constructor with a single List or BoundSignature parameter: %s", windowAccumulator);
         return Optional.of(windowAccumulator);
     }
 
