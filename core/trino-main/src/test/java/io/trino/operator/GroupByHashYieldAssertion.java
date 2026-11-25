@@ -226,8 +226,8 @@ public final class GroupByHashYieldAssertion
     private static long getHashTableSizeInBytes(Type hashKeyType, int capacity)
     {
         if (hashKeyType == BIGINT) {
-            // groupIds and values double by hashCapacity; while valuesByGroupId double by maxFill = hashCapacity / 0.75
-            return capacity * (long) (Long.BYTES * 1.75 + Integer.BYTES);
+            // the hash table keeps two longs (value and groupId) per slot and doubles by hashCapacity; while valuesByGroupId doubles by maxFill = hashCapacity * 0.75
+            return capacity * (long) (Long.BYTES * 2.75);
         }
 
         @SuppressWarnings("OverlyComplexArithmeticExpression")

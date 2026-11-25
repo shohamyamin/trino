@@ -45,14 +45,17 @@ public class BigintGroupByHash
     private static final int BATCH_SIZE = 1024;
 
     private static final float FILL_RATIO = 0.75f;
+    // two longs per slot must fit in a single array
+    private static final int MAX_HASH_CAPACITY = 1 << 29;
+    private static final long EMPTY_SLOT = -1;
 
     private int hashCapacity;
     private int maxFill;
     private int mask;
 
-    // the hash table from values to groupIds
-    private long[] values;
-    private int[] groupIds;
+    // the hash table from values to groupIds: slot i keeps its value at index 2 * i and its groupId, or EMPTY_SLOT,
+    // at index 2 * i + 1, so that probing a slot reads a single cache line
+    private long[] hashTable;
 
     // groupId for the null value
     private int nullGroupId = -1;
@@ -72,13 +75,11 @@ public class BigintGroupByHash
     {
         checkArgument(expectedSize > 0, "expectedSize must be greater than zero");
 
-        hashCapacity = arraySize(expectedSize, FILL_RATIO);
+        hashCapacity = min(arraySize(expectedSize, FILL_RATIO), MAX_HASH_CAPACITY);
 
         maxFill = calculateMaxFill(hashCapacity);
         mask = hashCapacity - 1;
-        values = new long[hashCapacity];
-        groupIds = new int[hashCapacity];
-        Arrays.fill(groupIds, -1);
+        hashTable = createHashTable(hashCapacity);
 
         valuesByGroupId = new long[maxFill];
 
@@ -92,8 +93,7 @@ public class BigintGroupByHash
         hashCapacity = other.hashCapacity;
         maxFill = other.maxFill;
         mask = other.mask;
-        values = Arrays.copyOf(other.values, other.values.length);
-        groupIds = Arrays.copyOf(other.groupIds, other.groupIds.length);
+        hashTable = Arrays.copyOf(other.hashTable, other.hashTable.length);
         nullGroupId = other.nullGroupId;
         valuesByGroupId = Arrays.copyOf(other.valuesByGroupId, other.valuesByGroupId.length);
         nextGroupId = other.nextGroupId;
@@ -107,8 +107,7 @@ public class BigintGroupByHash
     public long getEstimatedSize()
     {
         return INSTANCE_SIZE +
-                sizeOf(groupIds) +
-                sizeOf(values) +
+                sizeOf(hashTable) +
                 sizeOf(valuesByGroupId) +
                 preallocatedMemoryInBytes;
     }
@@ -204,13 +203,13 @@ public class BigintGroupByHash
 
         // look for an empty slot or a slot containing this key
         while (true) {
-            int groupId = groupIds[hashPosition];
-            if (groupId == -1) {
+            long groupId = hashTable[2 * hashPosition + 1];
+            if (groupId == EMPTY_SLOT) {
                 break;
             }
 
-            if (value == values[hashPosition]) {
-                return groupId;
+            if (value == hashTable[2 * hashPosition]) {
+                return (int) groupId;
             }
 
             // increment position and mask to handle wrap around
@@ -225,9 +224,9 @@ public class BigintGroupByHash
         // record group id in hash
         int groupId = nextGroupId++;
 
-        values[hashPosition] = value;
+        hashTable[2 * hashPosition] = value;
+        hashTable[2 * hashPosition + 1] = groupId;
         valuesByGroupId[groupId] = value;
-        groupIds[hashPosition] = groupId;
 
         // increase capacity, if necessary
         if (needRehash()) {
@@ -239,47 +238,44 @@ public class BigintGroupByHash
     private boolean tryRehash()
     {
         long newCapacityLong = hashCapacity * 2L;
-        if (newCapacityLong > Integer.MAX_VALUE) {
-            throw new TrinoException(GENERIC_INSUFFICIENT_RESOURCES, "Size of hash table cannot exceed 1 billion entries");
+        if (newCapacityLong > MAX_HASH_CAPACITY) {
+            throw new TrinoException(GENERIC_INSUFFICIENT_RESOURCES, "Size of hash table cannot exceed %s entries".formatted(MAX_HASH_CAPACITY));
         }
         int newCapacity = toIntExact(newCapacityLong);
 
         // An estimate of how much extra memory is needed before we can go ahead and expand the hash table.
-        // This includes the new capacity for values, groupIds, and valuesByGroupId as well as the size of the current page
-        preallocatedMemoryInBytes = newCapacity * (long) (Long.BYTES + Integer.BYTES) + ((long) calculateMaxFill(newCapacity)) * Long.BYTES + currentPageSizeInBytes;
+        // This includes the new capacity for the hash table and valuesByGroupId as well as the size of the current page
+        preallocatedMemoryInBytes = newCapacity * 2L * Long.BYTES + ((long) calculateMaxFill(newCapacity)) * Long.BYTES + currentPageSizeInBytes;
         if (!updateMemory.update()) {
             // reserved memory but has exceeded the limit
             return false;
         }
 
         int newMask = newCapacity - 1;
-        long[] newValues = new long[newCapacity];
-        int[] newGroupIds = new int[newCapacity];
-        Arrays.fill(newGroupIds, -1);
+        long[] newHashTable = createHashTable(newCapacity);
 
-        for (int i = 0; i < values.length; i++) {
-            int groupId = groupIds[i];
+        for (int i = 0; i < hashCapacity; i++) {
+            long groupId = hashTable[2 * i + 1];
 
-            if (groupId != -1) {
-                long value = values[i];
+            if (groupId != EMPTY_SLOT) {
+                long value = hashTable[2 * i];
                 int hashPosition = getHashPosition(value, newMask);
 
                 // find an empty slot for the address
-                while (newGroupIds[hashPosition] != -1) {
+                while (newHashTable[2 * hashPosition + 1] != EMPTY_SLOT) {
                     hashPosition = (hashPosition + 1) & newMask;
                 }
 
                 // record the mapping
-                newValues[hashPosition] = value;
-                newGroupIds[hashPosition] = groupId;
+                newHashTable[2 * hashPosition] = value;
+                newHashTable[2 * hashPosition + 1] = groupId;
             }
         }
 
         mask = newMask;
         hashCapacity = newCapacity;
         maxFill = calculateMaxFill(hashCapacity);
-        values = newValues;
-        groupIds = newGroupIds;
+        hashTable = newHashTable;
 
         this.valuesByGroupId = Arrays.copyOf(valuesByGroupId, maxFill);
 
@@ -287,6 +283,15 @@ public class BigintGroupByHash
         // release temporary memory reservation
         updateMemory.update();
         return true;
+    }
+
+    private static long[] createHashTable(int hashCapacity)
+    {
+        long[] hashTable = new long[2 * hashCapacity];
+        for (int i = 1; i < hashTable.length; i += 2) {
+            hashTable[i] = EMPTY_SLOT;
+        }
+        return hashTable;
     }
 
     private boolean needRehash()

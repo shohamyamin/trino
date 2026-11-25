@@ -298,7 +298,7 @@ public class TestHashAggregationOperator
                 .addSequencePage(10, 300, 0)
                 .build();
 
-        DriverContext driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION, DataSize.of(11, Unit.MEGABYTE))
+        DriverContext driverContext = createTaskContext(executor, scheduledExecutor, TEST_SESSION, DataSize.of(13, Unit.MEGABYTE))
                 .addPipelineContext(0, true, true, false)
                 .addDriverContext();
 
