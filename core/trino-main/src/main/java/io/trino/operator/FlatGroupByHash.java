@@ -366,6 +366,7 @@ public class FlatGroupByHash
                 }
 
                 hashGenerator.hashBlocksBatched(blocks, hashes, lastPosition, batchSize);
+                flatHash.prefetch(hashes, batchSize);
                 for (int i = 0; i < batchSize; i++) {
                     flatHash.putIfAbsent(blocks, lastPosition + i, hashes[i]);
                 }
@@ -532,6 +533,7 @@ public class FlatGroupByHash
                 }
 
                 hashGenerator.hashBlocksBatched(blocks, hashes, lastPosition, batchSize);
+                flatHash.prefetch(hashes, batchSize);
                 for (int i = 0, position = lastPosition; i < batchSize; i++, position++) {
                     groupIds[position] = flatHash.putIfAbsent(blocks, position, hashes[i]);
                 }

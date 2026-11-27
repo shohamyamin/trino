@@ -31,6 +31,7 @@ import static io.trino.operator.AppendOnlyVariableWidthData.getChunkOffset;
 import static io.trino.spi.StandardErrorCode.GENERIC_INSUFFICIENT_RESOURCES;
 import static java.lang.Math.addExact;
 import static java.lang.Math.max;
+import static java.lang.Math.min;
 import static java.lang.Math.multiplyExact;
 import static java.lang.Math.toIntExact;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
@@ -61,6 +62,11 @@ public final class FlatHash
     private static final int VECTOR_LENGTH = Long.BYTES;
     private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, LITTLE_ENDIAN);
 
+    // tables with at least this many slots (5 MB of control bytes and group ids) are larger than the
+    // processor caches, so it pays off to prefetch the probed slots
+    private static final int PREFETCH_MIN_CAPACITY = 1 << 20;
+    private static final int REHASH_BATCH_SIZE = 1024;
+
     private final FlatHashStrategy flatHashStrategy;
     private final AppendOnlyVariableWidthData variableWidthData;
     private final UpdateMemory checkMemoryReservation;
@@ -80,6 +86,7 @@ public final class FlatHash
     private int mask;
     private int nextGroupId;
     private int maxFill;
+    private long prefetchSink;
 
     public FlatHash(FlatHashStrategy flatHashStrategy, boolean cacheHashValue, int expectedSize, UpdateMemory checkMemoryReservation)
     {
@@ -254,6 +261,28 @@ public final class FlatHash
         return putIfAbsent(blocks, position, hash);
     }
 
+    /**
+     * Loads the first probed slots of the hashes into the cache, so that the following lookups of a
+     * batch do not wait for each cache miss in turn. The loads are independent of each other, so the
+     * processor can serve many of them at the same time. This only pays off when the table does not
+     * fit in the processor caches.
+     */
+    public void prefetch(long[] hashes, int batchSize)
+    {
+        if (capacity < PREFETCH_MIN_CAPACITY) {
+            return;
+        }
+        byte[] control = this.control;
+        int[] groupIdsByHash = this.groupIdsByHash;
+        int loaded = 0;
+        for (int i = 0; i < batchSize; i++) {
+            int bucket = bucket((int) (hashes[i] >> 7));
+            loaded += control[bucket] + groupIdsByHash[bucket];
+        }
+        // store the loaded values so that the loads are not eliminated
+        prefetchSink += loaded;
+    }
+
     public int putIfAbsent(Block[] blocks, int position, long hash)
     {
         int index = getIndex(blocks, position, hash);
@@ -411,34 +440,53 @@ public final class FlatHash
         groupIdsByHash = new int[capacity];
         Arrays.fill(groupIdsByHash, -1);
 
-        for (int groupId = 0; groupId < nextGroupId; groupId++) {
-            long hash = hashPosition(groupId);
-
-            byte hashPrefix = (byte) ((hash & 0x7F) | 0x80);
-            int bucket = bucket((int) (hash >> 7));
-
-            // getIndex is not used here because values in a rehash are always distinct
-            int step = 1;
-            while (true) {
-                final long controlVector = (long) LONG_HANDLE.get(control, bucket);
-                // values are already distinct, so just find the first empty slot
-                int emptyIndex = findEmptyInVector(controlVector, bucket);
-                if (emptyIndex >= 0) {
-                    setControl(emptyIndex, hashPrefix);
-                    if (groupIdsByHash[emptyIndex] != -1) {
-                        throw new IllegalStateException("groupId mapping already exists at index");
-                    }
-                    groupIdsByHash[emptyIndex] = groupId;
-                    break;
+        if (capacity < PREFETCH_MIN_CAPACITY) {
+            for (int groupId = 0; groupId < nextGroupId; groupId++) {
+                insertDistinct(groupId, hashPosition(groupId));
+            }
+        }
+        else {
+            // insert in batches, with the slots of a batch prefetched
+            long[] hashes = new long[REHASH_BATCH_SIZE];
+            for (int batchStart = 0; batchStart < nextGroupId; batchStart += REHASH_BATCH_SIZE) {
+                int batchSize = min(REHASH_BATCH_SIZE, nextGroupId - batchStart);
+                for (int i = 0; i < batchSize; i++) {
+                    hashes[i] = hashPosition(batchStart + i);
                 }
-                bucket = bucket(bucket + step);
-                step += VECTOR_LENGTH;
+                prefetch(hashes, batchSize);
+                for (int i = 0; i < batchSize; i++) {
+                    insertDistinct(batchStart + i, hashes[i]);
+                }
             }
         }
 
         // release temporary memory reservation
         temporaryRehashRetainedSize = 0;
         checkMemoryReservation.update();
+    }
+
+    private void insertDistinct(int groupId, long hash)
+    {
+        byte hashPrefix = (byte) ((hash & 0x7F) | 0x80);
+        int bucket = bucket((int) (hash >> 7));
+
+        // getIndex is not used here because values in a rehash are always distinct
+        int step = 1;
+        while (true) {
+            final long controlVector = (long) LONG_HANDLE.get(control, bucket);
+            // values are already distinct, so just find the first empty slot
+            int emptyIndex = findEmptyInVector(controlVector, bucket);
+            if (emptyIndex >= 0) {
+                setControl(emptyIndex, hashPrefix);
+                if (groupIdsByHash[emptyIndex] != -1) {
+                    throw new IllegalStateException("groupId mapping already exists at index");
+                }
+                groupIdsByHash[emptyIndex] = groupId;
+                return;
+            }
+            bucket = bucket(bucket + step);
+            step += VECTOR_LENGTH;
+        }
     }
 
     private int bucket(int hash)

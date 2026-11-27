@@ -108,6 +108,33 @@ public class TestGroupByHash
     }
 
     @Test
+    public void testLargeGroupCount()
+    {
+        // large enough for the hash table to prefetch probed slots
+        int groupCount = 1_500_000;
+        List<Type> types = ImmutableList.of(BIGINT, BIGINT);
+        GroupByHash groupByHash = createGroupByHash(types, false, 1, false, new FlatHashStrategyCompiler(new TypeOperators(), new NullSafeHashCompiler(new TypeOperators())), NOOP);
+        Block block = createLongSequenceBlock(0, groupCount);
+        Page page = new Page(block, block);
+
+        int[] groupIds = getGroupIds(groupByHash, page);
+        assertThat(groupIds).isEqualTo(IntStream.range(0, groupCount).toArray());
+        assertThat(groupByHash.getCapacity()).isGreaterThanOrEqualTo(1 << 20);
+
+        int[] reversed = IntStream.range(0, groupCount).map(position -> groupCount - 1 - position).toArray();
+        Block reversedBlock = block.copyPositions(reversed, 0, groupCount);
+        assertThat(getGroupIds(groupByHash, new Page(reversedBlock, reversedBlock))).isEqualTo(reversed);
+        assertThat(groupByHash.getGroupCount()).isEqualTo(groupCount);
+
+        PageBuilder pageBuilder = new PageBuilder(types);
+        for (int groupId = 0; groupId < 1000; groupId++) {
+            pageBuilder.declarePosition();
+            groupByHash.appendValuesTo(groupId, pageBuilder);
+        }
+        BlockAssertions.assertBlockEquals(BIGINT, pageBuilder.build().getBlock(1), createLongSequenceBlock(0, 1000));
+    }
+
+    @Test
     public void testRunLengthEncodedInputPage()
     {
         for (GroupByHashType groupByHashType : GroupByHashType.values()) {
