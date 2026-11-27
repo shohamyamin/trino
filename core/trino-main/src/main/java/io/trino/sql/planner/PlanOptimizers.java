@@ -138,6 +138,7 @@ import io.trino.sql.planner.iterative.rule.PruneUnnestColumns;
 import io.trino.sql.planner.iterative.rule.PruneUnnestSourceColumns;
 import io.trino.sql.planner.iterative.rule.PruneValuesColumns;
 import io.trino.sql.planner.iterative.rule.PruneWindowColumns;
+import io.trino.sql.planner.iterative.rule.PullConstantOffsetOutOfSum;
 import io.trino.sql.planner.iterative.rule.PushAggregationIntoTableScan;
 import io.trino.sql.planner.iterative.rule.PushAggregationThroughOuterJoin;
 import io.trino.sql.planner.iterative.rule.PushCastIntoRow;
@@ -471,6 +472,7 @@ public class PlanOptimizers
                                         new RewriteSpatialPartitioningAggregation(plannerContext),
                                         new SimplifyCountOverConstant(plannerContext),
                                         new PreAggregateCaseAggregations(plannerContext),
+                                        new PullConstantOffsetOutOfSum(plannerContext),
                                         new RemoveRedundantDistinctAggregation()))
                                 .build()),
                 // Union flattening must already be at fixpoint from InitialPlanCleanup before any
