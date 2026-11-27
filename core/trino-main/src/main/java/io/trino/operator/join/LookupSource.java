@@ -59,6 +59,20 @@ public interface LookupSource
 
     void appendTo(long position, PageBuilder pageBuilder, int outputChannelOffset);
 
+    /**
+     * Appends the rows at the join positions {@code positions[offset]} to {@code positions[offset + length - 1]}
+     * to the page builder starting at {@code outputChannelOffset}, without declaring positions. The rows can be
+     * appended in any order, so implementations can copy values in bulk: on return, {@code appendedRows[offset + k]}
+     * is the index in {@code positions} of the k-th appended row.
+     */
+    default void appendTo(long[] positions, int offset, int length, PageBuilder pageBuilder, int outputChannelOffset, int[] appendedRows)
+    {
+        for (int i = offset; i < offset + length; i++) {
+            appendTo(positions[i], pageBuilder, outputChannelOffset);
+            appendedRows[i] = i;
+        }
+    }
+
     boolean isJoinPositionEligible(long currentJoinPosition, int probePosition, Page allProbeChannelsPage);
 
     boolean isEmpty();

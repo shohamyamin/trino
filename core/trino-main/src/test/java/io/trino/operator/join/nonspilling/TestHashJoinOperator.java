@@ -63,6 +63,7 @@ import static io.trino.operator.JoinOperatorType.fullOuterJoin;
 import static io.trino.operator.JoinOperatorType.innerJoin;
 import static io.trino.operator.JoinOperatorType.probeOuterJoin;
 import static io.trino.operator.OperatorAssertion.assertOperatorEquals;
+import static io.trino.operator.OperatorAssertion.assertOperatorEqualsIgnoreOrder;
 import static io.trino.operator.OperatorAssertion.toMaterializedResult;
 import static io.trino.operator.OperatorAssertion.toPages;
 import static io.trino.operator.OperatorFactories.join;
@@ -530,6 +531,53 @@ public class TestHashJoinOperator
                 .build();
 
         assertOperatorEquals(joinOperatorFactory, taskContext.addPipelineContext(0, true, true, false).addDriverContext(), probeInput, expected, true);
+    }
+
+    @Test
+    public void testProbeOuterJoinWithManyBuildPages()
+    {
+        testProbeOuterJoinWithManyBuildPages(false);
+        testProbeOuterJoinWithManyBuildPages(true);
+    }
+
+    private void testProbeOuterJoinWithManyBuildPages(boolean parallelBuild)
+    {
+        TaskContext taskContext = createTaskContext();
+
+        // build rows are spread over many pages, so they are copied in bulk per build page, and each key matches two build rows
+        List<Type> buildTypes = ImmutableList.of(VARCHAR, BIGINT, BIGINT);
+        RowPagesBuilder buildPages = rowPagesBuilder(buildTypes);
+        for (int page = 0; page < 10; page++) {
+            buildPages.addSequencePage(50, (page % 5) * 50, 1000 + page * 50, 2000 + page * 50);
+        }
+        BuildSideSetup buildSideSetup = setupBuildSide(partitionFunctionProvider, parallelBuild, taskContext, buildPages, Ints.asList(0), Optional.empty());
+        JoinBridgeManager<PartitionedLookupSourceFactory> lookupSourceFactory = buildSideSetup.getLookupSourceFactoryManager();
+
+        // probe factory
+        List<Type> probeTypes = ImmutableList.of(VARCHAR, BIGINT, BIGINT);
+        RowPagesBuilder probePages = rowPagesBuilder(probeTypes);
+        List<Page> probeInput = probePages
+                .addSequencePage(500, 0, 0, 0)
+                .build();
+        OperatorFactory joinOperatorFactory = probeOuterJoinOperatorFactory(lookupSourceFactory, probePages, false);
+
+        // build drivers and operators
+        instantiateBuildDrivers(buildSideSetup, taskContext);
+        buildLookupSource(executor, buildSideSetup);
+
+        // expected
+        MaterializedResult.Builder expected = MaterializedResult.resultBuilder(concat(probeTypes, buildTypes));
+        for (long key = 0; key < 500; key++) {
+            if (key < 250) {
+                expected.row(String.valueOf(key), key, key, String.valueOf(key), 1000 + key, 2000 + key);
+                expected.row(String.valueOf(key), key, key, String.valueOf(key), 1250 + key, 2250 + key);
+            }
+            else {
+                expected.row(String.valueOf(key), key, key, null, null, null);
+            }
+        }
+
+        assertOperatorEqualsIgnoreOrder(joinOperatorFactory, taskContext.addPipelineContext(0, true, true, false).addDriverContext(), probeInput, expected.build());
     }
 
     @Test

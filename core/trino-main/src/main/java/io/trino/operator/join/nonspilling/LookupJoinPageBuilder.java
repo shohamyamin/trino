@@ -17,9 +17,11 @@ import io.trino.operator.join.LookupSource;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.type.Type;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
+import it.unimi.dsi.fastutil.longs.LongArrayList;
 
 import java.util.List;
 
@@ -27,19 +29,33 @@ import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Verify.verify;
 import static io.trino.operator.project.PageProcessor.MAX_BATCH_SIZE;
 import static io.trino.spi.block.PageBuilderStatus.DEFAULT_MAX_PAGE_SIZE_IN_BYTES;
+import static java.lang.Math.max;
 import static java.util.Objects.requireNonNull;
 
 /**
  * This page builder creates pages with dictionary blocks:
  * normal dictionary blocks for the probe side and the original blocks for the build side.
  * <p>
+ * Build rows are buffered and copied one column at a time when the page is built, so values
+ * can be copied in bulk for each build block instead of row by row.
+ * <p>
  * TODO use dictionary blocks (probably extended kind) to avoid data copying for build side
  */
 public class LookupJoinPageBuilder
 {
+    // number of build rows copied before the build row size is known, to estimate the output page size
+    private static final int INITIAL_BUILD_BATCH_SIZE = 64;
+
     private final IntArrayList probeIndexBuilder = new IntArrayList();
     private final PageBuilder buildPageBuilder;
     private final int buildOutputChannelCount;
+    // join positions of the build rows that are not copied yet, a negative value is a null build row
+    private final LongArrayList pendingBuildPositions = new LongArrayList();
+    // position in buildPageBuilder of the build values of each copied output row
+    private final IntArrayList buildRowIndexes = new IntArrayList();
+    private boolean buildRowsReordered;
+    private LookupSource lookupSource;
+    private long estimatedBuildRowSize = -1;
     private long estimatedProbeBlockBytes;
     private long estimatedProbeRowSize = -1;
     private int previousPosition = -1;
@@ -54,8 +70,9 @@ public class LookupJoinPageBuilder
 
     public boolean isFull()
     {
-        return estimatedProbeBlockBytes + buildPageBuilder.getSizeInBytes() >= DEFAULT_MAX_PAGE_SIZE_IN_BYTES ||
-                buildPageBuilder.getPositionCount() >= MAX_BATCH_SIZE ||
+        long estimatedBuildBytes = buildPageBuilder.getSizeInBytes() + pendingBuildPositions.size() * max(estimatedBuildRowSize, 0);
+        return estimatedProbeBlockBytes + estimatedBuildBytes >= DEFAULT_MAX_PAGE_SIZE_IN_BYTES ||
+                probeIndexBuilder.size() >= MAX_BATCH_SIZE ||
                 buildPageBuilder.isFull();
     }
 
@@ -76,6 +93,9 @@ public class LookupJoinPageBuilder
         // be aware that probeIndexBuilder will not clear its capacity
         probeIndexBuilder.clear();
         buildPageBuilder.reset();
+        pendingBuildPositions.clear();
+        buildRowIndexes.clear();
+        buildRowsReordered = false;
         estimatedProbeBlockBytes = 0;
         estimatedProbeRowSize = -1;
         previousPosition = -1;
@@ -84,16 +104,17 @@ public class LookupJoinPageBuilder
     }
 
     /**
-     * append the index for the probe and copy the row for the build
+     * append the index for the probe and the join position of the row for the build
      */
     public void appendRow(JoinProbe probe, LookupSource lookupSource, long joinPosition)
     {
+        verify(joinPosition >= 0);
         // probe side
         appendProbeIndex(probe);
 
         // build side
-        buildPageBuilder.declarePosition();
-        lookupSource.appendTo(joinPosition, buildPageBuilder, 0);
+        this.lookupSource = lookupSource;
+        appendBuildPosition(joinPosition);
     }
 
     /**
@@ -105,10 +126,7 @@ public class LookupJoinPageBuilder
         appendProbeIndex(probe);
 
         // build side
-        buildPageBuilder.declarePosition();
-        for (int i = 0; i < buildOutputChannelCount; i++) {
-            buildPageBuilder.getBlockBuilder(i).appendNull();
-        }
+        appendBuildPosition(-1);
     }
 
     public void repeatBuildRow()
@@ -118,6 +136,7 @@ public class LookupJoinPageBuilder
 
     public Page build(JoinProbe probe)
     {
+        copyBuildRows();
         if (repeatBuildRow) {
             return buildRepeatedPage(probe);
         }
@@ -153,7 +172,12 @@ public class LookupJoinPageBuilder
 
         int offset = probeOutputChannels.length;
         for (int i = 0; i < buildOutputChannelCount; i++) {
-            blocks[offset + i] = buildPageBuilder.getBlockBuilder(i).build();
+            Block block = buildPageBuilder.getBlockBuilder(i).build();
+            if (buildRowsReordered) {
+                // build rows were copied grouped by build block, restore the output row order
+                block = block.copyPositions(buildRowIndexes.elements(), 0, outputPositions);
+            }
+            blocks[offset + i] = block;
             verify(blocks[offset + i].getPositionCount() == outputPositions);
         }
         return new Page(outputPositions, blocks);
@@ -190,8 +214,79 @@ public class LookupJoinPageBuilder
     {
         return toStringHelper(this)
                 .add("estimatedSize", estimatedProbeBlockBytes + buildPageBuilder.getSizeInBytes())
-                .add("positionCount", buildPageBuilder.getPositionCount())
+                .add("positionCount", probeIndexBuilder.size())
                 .toString();
+    }
+
+    private void appendBuildPosition(long joinPosition)
+    {
+        pendingBuildPositions.add(joinPosition);
+        if (estimatedBuildRowSize < 0 && pendingBuildPositions.size() >= INITIAL_BUILD_BATCH_SIZE) {
+            copyBuildRows();
+        }
+    }
+
+    private void copyBuildRows()
+    {
+        int rowCount = pendingBuildPositions.size();
+        if (rowCount == 0) {
+            return;
+        }
+        long[] joinPositions = pendingBuildPositions.elements();
+        int firstRowIndex = buildPageBuilder.getPositionCount();
+
+        int nullCount = 0;
+        for (int i = 0; i < rowCount; i++) {
+            if (joinPositions[i] < 0) {
+                nullCount++;
+            }
+        }
+        int matchCount = rowCount - nullCount;
+
+        // null rows are appended first, followed by the matched rows in the order chosen by the lookup source
+        for (int channel = 0; channel < buildOutputChannelCount; channel++) {
+            BlockBuilder blockBuilder = buildPageBuilder.getBlockBuilder(channel);
+            for (int i = 0; i < nullCount; i++) {
+                blockBuilder.appendNull();
+            }
+        }
+
+        buildRowIndexes.size(firstRowIndex + rowCount);
+        int[] rowIndexes = buildRowIndexes.elements();
+        long[] matchPositions = joinPositions;
+        int[] matchRows = null;
+        if (nullCount > 0) {
+            matchPositions = new long[matchCount];
+            matchRows = new int[matchCount];
+            int nullIndex = 0;
+            int matchIndex = 0;
+            for (int i = 0; i < rowCount; i++) {
+                if (joinPositions[i] < 0) {
+                    rowIndexes[firstRowIndex + i] = firstRowIndex + nullIndex;
+                    nullIndex++;
+                }
+                else {
+                    matchPositions[matchIndex] = joinPositions[i];
+                    matchRows[matchIndex] = i;
+                    matchIndex++;
+                }
+            }
+        }
+        if (matchCount > 0) {
+            int[] appendedRows = new int[matchCount];
+            lookupSource.appendTo(matchPositions, 0, matchCount, buildPageBuilder, 0, appendedRows);
+            for (int i = 0; i < matchCount; i++) {
+                int row = matchRows == null ? appendedRows[i] : matchRows[appendedRows[i]];
+                rowIndexes[firstRowIndex + row] = firstRowIndex + nullCount + i;
+            }
+        }
+        buildPageBuilder.declarePositions(rowCount);
+
+        for (int i = firstRowIndex; i < firstRowIndex + rowCount; i++) {
+            buildRowsReordered |= rowIndexes[i] != i;
+        }
+        pendingBuildPositions.clear();
+        estimatedBuildRowSize = buildPageBuilder.getSizeInBytes() / buildPageBuilder.getPositionCount();
     }
 
     private void appendProbeIndex(JoinProbe probe)

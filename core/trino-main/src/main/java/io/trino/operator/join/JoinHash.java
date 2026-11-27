@@ -163,5 +163,11 @@ public final class JoinHash
     }
 
     @Override
+    public void appendTo(long[] positions, int offset, int length, PageBuilder pageBuilder, int outputChannelOffset, int[] appendedRows)
+    {
+        pagesHash.appendTo(positions, offset, length, pageBuilder, outputChannelOffset, appendedRows);
+    }
+
+    @Override
     public void close() {}
 }

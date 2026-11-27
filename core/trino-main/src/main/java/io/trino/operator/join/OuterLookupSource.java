@@ -100,6 +100,15 @@ public final class OuterLookupSource
     }
 
     @Override
+    public void appendTo(long[] positions, int offset, int length, PageBuilder pageBuilder, int outputChannelOffset, int[] appendedRows)
+    {
+        lookupSource.appendTo(positions, offset, length, pageBuilder, outputChannelOffset, appendedRows);
+        for (int i = offset; i < offset + length; i++) {
+            outerPositionTracker.positionVisited(positions[i]);
+        }
+    }
+
+    @Override
     public void close()
     {
         lookupSource.close();

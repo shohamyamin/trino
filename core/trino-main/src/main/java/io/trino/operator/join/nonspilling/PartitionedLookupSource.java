@@ -231,6 +231,46 @@ public class PartitionedLookupSource
     }
 
     @Override
+    public void appendTo(long[] positions, int offset, int length, PageBuilder pageBuilder, int outputChannelOffset, int[] appendedRows)
+    {
+        int partitionCount = lookupSources.length;
+
+        // group the rows by partition with a stable counting sort, so each partition can append its rows in bulk
+        int[] partitionOffsets = new int[partitionCount + 1];
+        for (int i = offset; i < offset + length; i++) {
+            partitionOffsets[decodePartition(positions[i]) + 1]++;
+        }
+        for (int partition = 0; partition < partitionCount; partition++) {
+            partitionOffsets[partition + 1] += partitionOffsets[partition];
+        }
+        int[] nextOffsets = Arrays.copyOf(partitionOffsets, partitionCount);
+        int[] groupedRows = new int[length];
+        long[] groupedJoinPositions = new long[length];
+        for (int i = offset; i < offset + length; i++) {
+            int partition = decodePartition(positions[i]);
+            int joinPosition = decodeJoinPosition(positions[i]);
+            int index = nextOffsets[partition]++;
+            groupedRows[index] = i;
+            groupedJoinPositions[index] = joinPosition;
+            if (outerPositionTracker != null) {
+                outerPositionTracker.positionVisited(partition, joinPosition);
+            }
+        }
+
+        int[] partitionAppendedRows = new int[length];
+        for (int partition = 0; partition < partitionCount; partition++) {
+            int start = partitionOffsets[partition];
+            int count = partitionOffsets[partition + 1] - start;
+            if (count > 0) {
+                lookupSources[partition].appendTo(groupedJoinPositions, start, count, pageBuilder, outputChannelOffset, partitionAppendedRows);
+            }
+        }
+        for (int i = 0; i < length; i++) {
+            appendedRows[offset + i] = groupedRows[partitionAppendedRows[i]];
+        }
+    }
+
+    @Override
     public long joinPositionWithinPartition(long joinPosition)
     {
         return decodeJoinPosition(joinPosition);

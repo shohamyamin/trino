@@ -34,6 +34,7 @@ import java.util.OptionalInt;
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
+import static io.trino.sql.gen.JoinCompiler.appendBlockGroups;
 import static java.util.Objects.requireNonNull;
 
 public class SimplePagesHashStrategy
@@ -112,6 +113,15 @@ public class SimplePagesHashStrategy
             List<Block> channel = channels.get(outputIndex);
             Block block = channel.get(blockIndex);
             pageBuilder.getBlockBuilder(outputChannelOffset).append(block.getUnderlyingValueBlock(), block.getUnderlyingValuePosition(position));
+            outputChannelOffset++;
+        }
+    }
+
+    @Override
+    public void appendBlockGroupsTo(int[] blockOffsets, int[] positions, PageBuilder pageBuilder, int outputChannelOffset)
+    {
+        for (int outputIndex : outputChannels) {
+            appendBlockGroups(channels.get(outputIndex), blockOffsets, positions, pageBuilder.getBlockBuilder(outputChannelOffset));
             outputChannelOffset++;
         }
     }

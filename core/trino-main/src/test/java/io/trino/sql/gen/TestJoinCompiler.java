@@ -290,6 +290,31 @@ public class TestJoinCompiler
                     booleanChannel.get(leftBlockIndex),
                     extraChannel.get(leftBlockIndex)));
         }
+
+        // append rows of all blocks in a single batch, in reverse order
+        int rowCount = 30;
+        int[] blockIndexes = new int[rowCount];
+        int[] positions = new int[rowCount];
+        for (int i = 0; i < rowCount; i++) {
+            blockIndexes[i] = (rowCount - 1 - i) / 10;
+            positions[i] = (rowCount - 1 - i) % 10;
+        }
+        int[] appendedRows = new int[rowCount];
+        PageBuilder batchPageBuilder = new PageBuilder(outputTypes);
+        hashStrategy.appendTo(blockIndexes, positions, rowCount, batchPageBuilder, 0, appendedRows);
+        batchPageBuilder.declarePositions(rowCount);
+
+        PageBuilder expectedPageBuilder = new PageBuilder(outputTypes);
+        for (int i = 0; i < rowCount; i++) {
+            // rows are grouped by block, in a stable order
+            assertThat(blockIndexes[appendedRows[i]]).isEqualTo(i / 10);
+            if (i % 10 > 0) {
+                assertThat(appendedRows[i]).isGreaterThan(appendedRows[i - 1]);
+            }
+            expectedPageBuilder.declarePosition();
+            expectedHashStrategy.appendTo(blockIndexes[appendedRows[i]], positions[appendedRows[i]], expectedPageBuilder, 0);
+        }
+        assertPageEquals(outputTypes, batchPageBuilder.build(), expectedPageBuilder.build());
     }
 
     @Test

@@ -291,6 +291,24 @@ public final class DefaultPagesHash
         pagesHashStrategy.appendTo(blockIndex, blockPosition, pageBuilder, outputChannelOffset);
     }
 
+    @Override
+    public void appendTo(long[] positions, int offset, int length, PageBuilder pageBuilder, int outputChannelOffset, int[] appendedRows)
+    {
+        int[] blockIndexes = new int[length];
+        int[] blockPositions = new int[length];
+        for (int i = 0; i < length; i++) {
+            long pageAddress = addresses.getLong(toIntExact(positions[offset + i]));
+            blockIndexes[i] = decodeSliceIndex(pageAddress);
+            blockPositions[i] = decodePosition(pageAddress);
+        }
+
+        int[] strategyAppendedRows = new int[length];
+        pagesHashStrategy.appendTo(blockIndexes, blockPositions, length, pageBuilder, outputChannelOffset, strategyAppendedRows);
+        for (int i = 0; i < length; i++) {
+            appendedRows[offset + i] = offset + strategyAppendedRows[i];
+        }
+    }
+
     private boolean isPositionNull(int position)
     {
         long pageAddress = addresses.getLong(position);

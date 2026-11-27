@@ -262,6 +262,7 @@ public class JoinCompiler
         generateGetChannelCountMethod(classDefinition, outputChannels.size());
         generateGetSizeInBytesMethod(classDefinition, sizeField);
         generateAppendToMethod(classDefinition, outputChannels, channelFields);
+        generateAppendBlockGroupsToMethod(classDefinition, outputChannels, channelFields);
         generateHashPositionMethod(classDefinition, callSiteBinder, joinChannelTypes, joinChannelFields);
         generateHashRowMethod(classDefinition, callSiteBinder, joinChannelTypes);
         generateRowIdenticalToRowMethod(classDefinition, callSiteBinder, joinChannelTypes);
@@ -374,6 +375,35 @@ public class JoinCompiler
                                     block.invoke("getUnderlyingValueBlock", ValueBlock.class),
                                     block.invoke("getUnderlyingValuePosition", int.class, blockPosition)));
                     return appendToBody;
+                });
+    }
+
+    private static void generateAppendBlockGroupsToMethod(ClassDefinition classDefinition, List<Integer> outputChannels, List<FieldDefinition> channelFields)
+    {
+        Parameter blockOffsets = arg("blockOffsets", int[].class);
+        Parameter positions = arg("positions", int[].class);
+        Parameter pageBuilder = arg("pageBuilder", PageBuilder.class);
+        Parameter outputChannelOffset = arg("outputChannelOffset", int.class);
+
+        generateOutputChannelsMethod(
+                classDefinition,
+                "appendBlockGroupsTo",
+                ImmutableList.of(blockOffsets, positions, pageBuilder, outputChannelOffset),
+                outputChannels.size(),
+                (thisVariable, _, pageBuilderOutputChannel) -> {
+                    BytecodeBlock appendBody = new BytecodeBlock();
+                    if (isClassDumpEnabled()) {
+                        appendBody.comment("appendBlockGroups(channel_%s, blockOffsets, positions, pageBuilder.getBlockBuilder(outputChannelOffset + %s));", outputChannels.get(pageBuilderOutputChannel), pageBuilderOutputChannel);
+                    }
+                    appendBody.append(invokeStatic(
+                            JoinCompiler.class,
+                            "appendBlockGroups",
+                            void.class,
+                            thisVariable.getField(channelFields.get(outputChannels.get(pageBuilderOutputChannel))),
+                            blockOffsets,
+                            positions,
+                            pageBuilder.invoke("getBlockBuilder", BlockBuilder.class, add(outputChannelOffset, constantInt(pageBuilderOutputChannel)))));
+                    return appendBody;
                 });
     }
 
@@ -994,6 +1024,35 @@ public class JoinCompiler
             return new TrinoException(COMPILER_ERROR, e);
         }
         return e;
+    }
+
+    /**
+     * Appends the values of one channel for rows grouped by block, with one bulk copy per block.
+     * See {@link PagesHashStrategy#appendBlockGroupsTo(int[], int[], PageBuilder, int)}.
+     */
+    @UsedByGeneratedCode
+    public static void appendBlockGroups(List<Block> channel, int[] blockOffsets, int[] positions, BlockBuilder blockBuilder)
+    {
+        int[] underlyingPositions = null;
+        for (int blockIndex = 0; blockIndex < blockOffsets.length - 1; blockIndex++) {
+            int start = blockOffsets[blockIndex];
+            int count = blockOffsets[blockIndex + 1] - start;
+            if (count == 0) {
+                continue;
+            }
+            Block block = channel.get(blockIndex);
+            if (block instanceof ValueBlock valueBlock) {
+                blockBuilder.appendPositions(valueBlock, positions, start, count);
+                continue;
+            }
+            if (underlyingPositions == null) {
+                underlyingPositions = new int[positions.length];
+            }
+            for (int i = start; i < start + count; i++) {
+                underlyingPositions[i] = block.getUnderlyingValuePosition(positions[i]);
+            }
+            blockBuilder.appendPositions(block.getUnderlyingValueBlock(), underlyingPositions, start, count);
+        }
     }
 
     @UsedByGeneratedCode

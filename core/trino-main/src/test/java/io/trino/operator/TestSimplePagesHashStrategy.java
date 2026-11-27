@@ -15,7 +15,9 @@ package io.trino.operator;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.spi.Page;
+import io.trino.spi.PageBuilder;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.DictionaryBlock;
 import io.trino.spi.block.IntArrayBlock;
 import io.trino.spi.type.MapType;
 import io.trino.spi.type.Type;
@@ -89,6 +91,45 @@ public class TestSimplePagesHashStrategy
         assertThatThrownBy(() -> strategy.compareSortChannelPositions(0, 0, 0, 0))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("type is not orderable");
+    }
+
+    @Test
+    public void testAppendRows()
+    {
+        List<Block> blocks = ImmutableList.of(
+                new IntArrayBlock(3, Optional.empty(), new int[] {10, 11, 12}),
+                DictionaryBlock.create(3, new IntArrayBlock(2, Optional.empty(), new int[] {20, 21}), new int[] {1, 0, 1}));
+        SimplePagesHashStrategy strategy = new SimplePagesHashStrategy(
+                ImmutableList.of(INTEGER),
+                ImmutableList.of(0),
+                ImmutableList.of(new ObjectArrayList<>(blocks)),
+                ImmutableList.of(0),
+                Optional.empty(),
+                new BlockTypeOperators());
+
+        // fewer rows than twice the block count are appended in the given order
+        assertAppendedRows(strategy, new int[] {1, 0, 1}, new int[] {2, 0, 1}, new int[] {21, 10, 20}, new int[] {0, 1, 2});
+        // more rows are appended grouped by block, in a stable order
+        assertAppendedRows(
+                strategy,
+                new int[] {1, 0, 1, 0, 1, 0},
+                new int[] {0, 2, 1, 0, 2, 1},
+                new int[] {21, 12, 20, 10, 21, 11},
+                new int[] {1, 3, 5, 0, 2, 4});
+    }
+
+    private static void assertAppendedRows(SimplePagesHashStrategy strategy, int[] blockIndexes, int[] positions, int[] expectedValues, int[] expectedAppendedRows)
+    {
+        PageBuilder pageBuilder = new PageBuilder(ImmutableList.of(INTEGER));
+        int[] appendedRows = new int[blockIndexes.length];
+        strategy.appendTo(blockIndexes, positions, blockIndexes.length, pageBuilder, 0, appendedRows);
+        pageBuilder.declarePositions(blockIndexes.length);
+        Block block = pageBuilder.build().getBlock(0);
+
+        assertThat(appendedRows).containsExactly(expectedAppendedRows);
+        for (int i = 0; i < appendedRows.length; i++) {
+            assertThat(INTEGER.getInt(block, i)).isEqualTo(expectedValues[appendedRows[i]]);
+        }
     }
 
     private static SimplePagesHashStrategy createSimplePagesHashStrategy(Type type, List<Block> channelBlocks)
