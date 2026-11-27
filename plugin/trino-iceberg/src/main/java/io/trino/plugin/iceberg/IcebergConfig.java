@@ -43,7 +43,7 @@ import static io.airlift.units.DataSize.Unit.GIGABYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.plugin.iceberg.CatalogType.HIVE_METASTORE;
 import static io.trino.plugin.iceberg.IcebergFileFormat.PARQUET;
-import static io.trino.plugin.iceberg.ParquetFooterCacheType.NONE;
+import static io.trino.plugin.iceberg.ParquetFooterCacheType.MEMORY;
 import static java.util.Locale.ENGLISH;
 import static java.util.concurrent.TimeUnit.DAYS;
 import static java.util.concurrent.TimeUnit.HOURS;
@@ -110,7 +110,7 @@ public class IcebergConfig
     private int metadataParallelism = 8;
     private boolean metadataVirtualThreadsEnabled = true;
     private boolean bucketExecutionEnabled = true;
-    private ParquetFooterCacheType parquetFooterCacheType = NONE;
+    private ParquetFooterCacheType parquetFooterCacheType = MEMORY;
     private DataSize parquetFooterCacheMemoryMaxSize = DataSize.of(10, MEGABYTE);
     private int domainCompactionThreshold = 1000;
 

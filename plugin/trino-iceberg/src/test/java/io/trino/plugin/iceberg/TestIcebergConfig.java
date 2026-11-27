@@ -92,7 +92,7 @@ public class TestIcebergConfig
                 .setMetadataParallelism(8)
                 .setMetadataVirtualThreadsEnabled(true)
                 .setBucketExecutionEnabled(true)
-                .setParquetFooterCacheType(NONE)
+                .setParquetFooterCacheType(MEMORY)
                 .setParquetFooterCacheMemoryMaxSize(DataSize.of(10, MEGABYTE))
                 .setDomainCompactionThreshold(1000));
     }
@@ -144,7 +144,7 @@ public class TestIcebergConfig
                 .put("iceberg.metadata.parallelism", "10")
                 .put("iceberg.metadata.virtual-threads-enabled", "false")
                 .put("iceberg.bucket-execution", "false")
-                .put("iceberg.parquet-footer-cache.type", "MEMORY")
+                .put("iceberg.parquet-footer-cache.type", "NONE")
                 .put("iceberg.parquet-footer-cache.memory.max-size", "42MB")
                 .put("iceberg.domain-compaction-threshold", "10000")
                 .buildOrThrow();
@@ -194,7 +194,7 @@ public class TestIcebergConfig
                 .setMetadataParallelism(10)
                 .setMetadataVirtualThreadsEnabled(false)
                 .setBucketExecutionEnabled(false)
-                .setParquetFooterCacheType(MEMORY)
+                .setParquetFooterCacheType(NONE)
                 .setParquetFooterCacheMemoryMaxSize(DataSize.of(42, MEGABYTE))
                 .setDomainCompactionThreshold(10000);
 
