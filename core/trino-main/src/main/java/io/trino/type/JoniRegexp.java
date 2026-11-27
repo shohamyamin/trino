@@ -16,18 +16,32 @@ package io.trino.type;
 import io.airlift.joni.Matcher;
 import io.airlift.joni.Regex;
 import io.airlift.slice.Slice;
+import jakarta.annotation.Nullable;
 
+import static io.airlift.slice.SliceUtf8.isAscii;
 import static java.util.Objects.requireNonNull;
 
 public final class JoniRegexp
 {
     private final Slice pattern;
     private final Regex regex;
+    @Nullable
+    private final Regex asciiRegex;
 
     public JoniRegexp(Slice pattern, Regex regex)
     {
+        this(pattern, regex, null);
+    }
+
+    /**
+     * @param asciiRegex the pattern compiled for ASCII input, which matches ASCII input exactly
+     * like {@code regex} does, or null
+     */
+    public JoniRegexp(Slice pattern, Regex regex, @Nullable Regex asciiRegex)
+    {
         this.pattern = requireNonNull(pattern, "pattern is null");
         this.regex = requireNonNull(regex, "regex is null");
+        this.asciiRegex = asciiRegex;
     }
 
     public Slice pattern()
@@ -37,6 +51,18 @@ public final class JoniRegexp
 
     public Regex regex()
     {
+        return regex;
+    }
+
+    /**
+     * Returns the regex to match the source with. ASCII sources are matched with a regex compiled for
+     * a single byte encoding when there is one, which avoids decoding the length of every character.
+     */
+    public Regex regexFor(Slice source)
+    {
+        if (asciiRegex != null && isAscii(source)) {
+            return asciiRegex;
+        }
         return regex;
     }
 

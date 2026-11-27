@@ -62,7 +62,7 @@ public final class JoniRegexpFunctions
     static Matcher matcher(Slice source, JoniRegexp pattern)
     {
         int base = source.byteArrayOffset();
-        return pattern.regex().matcher(source.byteArray(), base, base + source.length());
+        return pattern.regexFor(source).matcher(source.byteArray(), base, base + source.length());
     }
 
     /**

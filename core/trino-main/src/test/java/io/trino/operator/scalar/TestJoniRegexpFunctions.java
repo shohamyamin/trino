@@ -22,7 +22,9 @@ import io.trino.type.JoniRegexp;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.airlift.slice.Slices.utf8Slice;
@@ -46,6 +48,72 @@ public class TestJoniRegexpFunctions
     public TestJoniRegexpFunctions()
     {
         super(JONI);
+    }
+
+    @Test
+    public void testAsciiCompatiblePatterns()
+    {
+        assertThat(JoniRegexpCasts.isAsciiCompatible(utf8Slice("^https?://(?:www\\.)?([^/]+)/.*$"))).isTrue();
+        assertThat(JoniRegexpCasts.isAsciiCompatible(utf8Slice("\\w+\\s*\\d\\b(?=x)(?!y)(?<=z)(?<!w)(?>a)(?<name>b)\\.\\Qa\\E"))).isTrue();
+        assertThat(JoniRegexpCasts.isAsciiCompatible(utf8Slice("straße"))).isFalse();
+        assertThat(JoniRegexpCasts.isAsciiCompatible(utf8Slice("(?i)abc"))).isFalse();
+        assertThat(JoniRegexpCasts.isAsciiCompatible(utf8Slice("a(?i:b)"))).isFalse();
+        assertThat(JoniRegexpCasts.isAsciiCompatible(utf8Slice("[[:punct:]]"))).isFalse();
+        assertThat(JoniRegexpCasts.isAsciiCompatible(utf8Slice("\\p{L}"))).isFalse();
+        assertThat(JoniRegexpCasts.isAsciiCompatible(utf8Slice("\\x{263a}"))).isFalse();
+        assertThat(JoniRegexpCasts.isAsciiCompatible(utf8Slice("\\u00e9"))).isFalse();
+        assertThat(JoniRegexpCasts.isAsciiCompatible(utf8Slice("(a)\\1"))).isFalse();
+        assertThat(JoniRegexpCasts.isAsciiCompatible(utf8Slice("abc\\"))).isFalse();
+    }
+
+    @Test
+    public void testAsciiRegexMatchesLikeUtf8Regex()
+    {
+        String[] patterns = {
+                "^https?://(?:www\\.)?([^/]+)/.*$",
+                "\\w+",
+                "\\W",
+                "\\s+(\\S+)",
+                "\\b\\d+\\b",
+                "[^a-z]+",
+                ".",
+                ".*?x",
+                "(a|bc)*",
+                "",
+                "x*",
+                "(?<=a)b",
+                "a(?!b)",
+                "[\\w.-]+@[\\w.-]+",
+                "\\Qa.b\\E",
+                "$"};
+        String[] inputs = {"", "a", "abc", "http://www.example.com/path/x?y=1", "https://example.ru/", "a b\tc\nd", "x.y-z@q.r", "!$+<=>^`|~", "\u001F\u001Ca\u007F", "abab bcbc 123 a1b2"};
+        for (String patternString : patterns) {
+            Slice pattern = utf8Slice(patternString);
+            JoniRegexp utf8Regexp = new JoniRegexp(pattern, joniRegexp(pattern).regex());
+            JoniRegexp regexp = joniRegexp(pattern);
+            for (String inputString : inputs) {
+                Slice input = utf8Slice(inputString);
+                assertThat(regexp.regexFor(input))
+                        .isNotSameAs(utf8Regexp.regexFor(input));
+                assertThat(regexpLike(input, regexp)).isEqualTo(regexpLike(input, utf8Regexp));
+                assertThat(regexpReplace(input, regexp, utf8Slice("<$0>"))).isEqualTo(regexpReplace(input, utf8Regexp, utf8Slice("<$0>")));
+                assertThat(regexpCount(input, regexp)).isEqualTo(regexpCount(input, utf8Regexp));
+                assertThat(toList(regexpSplit(input, regexp))).isEqualTo(toList(regexpSplit(input, utf8Regexp)));
+                assertThat(regexpExtract(input, regexp)).isEqualTo(regexpExtract(input, utf8Regexp));
+            }
+            // non ASCII input is matched with the regex compiled for UTF-8
+            Slice input = utf8Slice("über straße");
+            assertThat(regexp.regexFor(input)).isSameAs(regexp.regex());
+        }
+    }
+
+    private static List<String> toList(Block block)
+    {
+        List<String> values = new ArrayList<>();
+        for (int position = 0; position < block.getPositionCount(); position++) {
+            values.add(block.isNull(position) ? null : VARCHAR.getSlice(block, position).toStringUtf8());
+        }
+        return values;
     }
 
     @Test

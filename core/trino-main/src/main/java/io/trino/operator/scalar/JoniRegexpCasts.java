@@ -13,6 +13,8 @@
  */
 package io.trino.operator.scalar;
 
+import com.google.common.annotations.VisibleForTesting;
+import io.airlift.jcodings.specific.ASCIIEncoding;
 import io.airlift.jcodings.specific.NonStrictUTF8Encoding;
 import io.airlift.joni.Option;
 import io.airlift.joni.Regex;
@@ -32,6 +34,9 @@ import static io.trino.spi.type.Chars.padSpaces;
 
 public final class JoniRegexpCasts
 {
+    // character class shorthands, anchors, control characters and quoting
+    private static final String SAFE_ESCAPES = "dDwWsSbBAzZGtnrfaeQE";
+
     private JoniRegexpCasts() {}
 
     // fallible
@@ -62,6 +67,62 @@ public final class JoniRegexpCasts
         catch (Exception e) {
             throw new TrinoException(INVALID_FUNCTION_ARGUMENT, e);
         }
-        return new JoniRegexp(pattern, regex);
+
+        Regex asciiRegex = null;
+        if (isAsciiCompatible(pattern)) {
+            try {
+                asciiRegex = new Regex(pattern.getBytes(), 0, pattern.length(), Option.DEFAULT, ASCIIEncoding.INSTANCE, Syntax.Java);
+            }
+            catch (RuntimeException e) {
+                // the regex compiled for UTF-8 is used for all input
+            }
+        }
+        return new JoniRegexp(pattern, regex, asciiRegex);
+    }
+
+    /**
+     * Whether the pattern matches ASCII input in a single byte encoding exactly like in UTF-8. This
+     * holds for patterns of ASCII characters, unless their meaning depends on Unicode: case insensitive
+     * matching and other inline options, POSIX bracket classes and Unicode properties, which classify
+     * some ASCII characters differently, and escapes of arbitrary code points. Escapes that are not
+     * known to be safe are rejected.
+     */
+    @VisibleForTesting
+    static boolean isAsciiCompatible(Slice pattern)
+    {
+        for (int i = 0; i < pattern.length(); i++) {
+            byte value = pattern.getByte(i);
+            if (value < 0) {
+                return false;
+            }
+            if (value == '\\') {
+                i++;
+                if (i == pattern.length()) {
+                    return false;
+                }
+                byte escaped = pattern.getByte(i);
+                if (isAsciiLetterOrDigit(escaped) && SAFE_ESCAPES.indexOf(escaped) < 0) {
+                    return false;
+                }
+            }
+            else if (value == '[' && i + 1 < pattern.length() && pattern.getByte(i + 1) == ':') {
+                return false;
+            }
+            else if (value == '(' && i + 2 < pattern.length() && pattern.getByte(i + 1) == '?' && !isGroupConstruct(pattern.getByte(i + 2))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isGroupConstruct(byte value)
+    {
+        // non-capturing group, lookahead, atomic group and lookbehind; named groups start with a letter after '<'
+        return value == ':' || value == '=' || value == '!' || value == '>' || value == '<';
+    }
+
+    private static boolean isAsciiLetterOrDigit(byte value)
+    {
+        return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9');
     }
 }
