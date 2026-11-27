@@ -197,7 +197,13 @@ public class FjsMatcher
 
                 byte[] term = patterns.get(i);
 
-                int position = find(input, start, remaining, term, bmsShifts.get(i), kmpShifts.get(i));
+                int position;
+                if (VectorizedSubstringSearch.shouldUse(term.length, remaining)) {
+                    position = VectorizedSubstringSearch.find(input, start, remaining, term);
+                }
+                else {
+                    position = find(input, start, remaining, term, bmsShifts.get(i), kmpShifts.get(i));
+                }
                 if (position == -1) {
                     return false;
                 }
