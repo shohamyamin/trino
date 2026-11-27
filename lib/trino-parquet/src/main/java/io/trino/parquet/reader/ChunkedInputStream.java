@@ -41,6 +41,7 @@ import static java.util.Objects.requireNonNull;
 public final class ChunkedInputStream
         extends InputStream
 {
+    private final ChunkReader firstChunk;
     private final Iterator<? extends ChunkReader> chunks;
     private ChunkReader currentChunkReader;
     // current is explicitly initialized to EMPTY_SLICE as this field is set to null when the stream is closed
@@ -50,7 +51,18 @@ public final class ChunkedInputStream
     {
         requireNonNull(chunks, "chunks is null");
         checkArgument(!chunks.isEmpty(), "At least one chunk is expected but got none");
+        this.firstChunk = chunks.iterator().next();
         this.chunks = chunks.iterator();
+    }
+
+    /**
+     * Starts loading the first chunk in the background, if the stream has not been read yet.
+     */
+    public void prefetch()
+    {
+        if (current != null && currentChunkReader == null) {
+            firstChunk.prefetch();
+        }
     }
 
     public Slice getSlice(int length)

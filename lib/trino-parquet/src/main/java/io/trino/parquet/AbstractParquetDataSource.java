@@ -26,11 +26,17 @@ import io.trino.memory.context.LocalMemoryContext;
 import io.trino.parquet.reader.ChunkedInputStream;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
@@ -67,6 +73,22 @@ public abstract class AbstractParquetDataSource
 
     protected abstract void readInternal(long position, byte[] buffer, int bufferOffset, int bufferLength)
             throws IOException;
+
+    /**
+     * Returns the executor used to load planned ranges in the background, before they are read.
+     * When present, {@link #readInternalConcurrently} must be safe to call from any thread,
+     * concurrently with other reads of this data source.
+     */
+    protected Optional<Executor> getPrefetchExecutor()
+    {
+        return Optional.empty();
+    }
+
+    protected void readInternalConcurrently(long position, byte[] buffer, int bufferOffset, int bufferLength)
+            throws IOException
+    {
+        throw new UnsupportedOperationException();
+    }
 
     @Override
     public ParquetDataSourceId getId()
@@ -122,8 +144,13 @@ public abstract class AbstractParquetDataSource
 
         readInternal(position, buffer, bufferOffset, bufferLength);
 
-        readTimeNanos += System.nanoTime() - start;
-        readBytes += bufferLength;
+        recordRead(System.nanoTime() - start, bufferLength);
+    }
+
+    private void recordRead(long nanos, int length)
+    {
+        readTimeNanos += nanos;
+        readBytes += length;
     }
 
     @Override
@@ -232,6 +259,12 @@ public abstract class AbstractParquetDataSource
                         {
                             mergedRangeLoader.free();
                         }
+
+                        @Override
+                        public void prefetch()
+                        {
+                            mergedRangeLoader.prefetch();
+                        }
                     });
                 }
             }
@@ -301,6 +334,9 @@ public abstract class AbstractParquetDataSource
         private final LocalMemoryContext readerMemoryUsage;
         private Slice data;
         private int referenceCount = 1;
+        // background load started by prefetch(), and the buffer it reads into
+        private CompletableFuture<Void> prefetchFuture;
+        private byte[] prefetchBuffer;
 
         public ReferenceCountedReader(DiskRange range, AggregatedMemoryContext memoryContext)
         {
@@ -328,13 +364,67 @@ public abstract class AbstractParquetDataSource
             checkState(referenceCount > 0, "Chunk reader is already closed");
 
             if (data == null) {
-                byte[] buffer = new byte[toIntExact(range.length())];
-                readerMemoryUsage.setBytes(buffer.length);
-                readFully(range.offset(), buffer, 0, buffer.length);
-                data = Slices.wrappedBuffer(buffer);
+                if (prefetchFuture != null) {
+                    data = Slices.wrappedBuffer(awaitPrefetch());
+                }
+                else {
+                    byte[] buffer = new byte[toIntExact(range.length())];
+                    readerMemoryUsage.setBytes(buffer.length);
+                    readFully(range.offset(), buffer, 0, buffer.length);
+                    data = Slices.wrappedBuffer(buffer);
+                }
             }
 
             return data;
+        }
+
+        @Override
+        public void prefetch()
+        {
+            checkState(referenceCount > 0, "Chunk reader is already closed");
+            if (data != null || prefetchFuture != null) {
+                return;
+            }
+            Optional<Executor> executor = getPrefetchExecutor();
+            if (executor.isEmpty()) {
+                return;
+            }
+            byte[] buffer = new byte[toIntExact(range.length())];
+            readerMemoryUsage.setBytes(buffer.length);
+            prefetchBuffer = buffer;
+            prefetchFuture = CompletableFuture.runAsync(() -> {
+                try {
+                    readInternalConcurrently(range.offset(), buffer, 0, buffer.length);
+                }
+                catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            }, executor.get());
+        }
+
+        private byte[] awaitPrefetch()
+                throws IOException
+        {
+            CompletableFuture<Void> future = prefetchFuture;
+            byte[] buffer = prefetchBuffer;
+            prefetchFuture = null;
+            prefetchBuffer = null;
+
+            long start = System.nanoTime();
+            try {
+                future.get();
+                recordRead(System.nanoTime() - start, buffer.length);
+                return buffer;
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new InterruptedIOException("Interrupted while reading " + range);
+            }
+            catch (ExecutionException | RuntimeException _) {
+                // read again on this thread, so failures are reported like other reads
+                readFully(range.offset(), buffer, 0, buffer.length);
+                return buffer;
+            }
         }
 
         @Override
@@ -345,6 +435,12 @@ public abstract class AbstractParquetDataSource
             referenceCount--;
             if (referenceCount == 0) {
                 data = null;
+                if (prefetchFuture != null) {
+                    // the background read completes on its own, its buffer is dropped
+                    prefetchFuture.cancel(false);
+                    prefetchFuture = null;
+                    prefetchBuffer = null;
+                }
                 readerMemoryUsage.setBytes(0);
             }
         }
