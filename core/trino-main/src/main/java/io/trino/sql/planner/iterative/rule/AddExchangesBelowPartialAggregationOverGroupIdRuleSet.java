@@ -111,7 +111,7 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
                             typeOf(ProjectNode.class).capturedAs(PROJECTION)
                                     .with(source().matching(
                                             typeOf(AggregationNode.class).capturedAs(AGGREGATION)
-                                                    .with(step().equalTo(AggregationNode.Step.PARTIAL))
+                                                    .with(step().matching(AddExchangesBelowPartialAggregationOverGroupIdRuleSet::isPartialStep))
                                                     .with(nonEmpty(groupingColumns()))
                                                     .with(source().matching(
                                                             typeOf(GroupIdNode.class).capturedAs(GROUP_ID)))))));
@@ -122,12 +122,19 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
                     .with(scope().equalTo(REMOTE)).capturedAs(REMOTE_EXCHANGE)
                     .with(source().matching(
                             typeOf(AggregationNode.class).capturedAs(AGGREGATION)
-                                    .with(step().equalTo(AggregationNode.Step.PARTIAL))
+                                    .with(step().matching(AddExchangesBelowPartialAggregationOverGroupIdRuleSet::isPartialStep))
                                     .with(nonEmpty(groupingColumns()))
                                     .with(source().matching(
                                             typeOf(GroupIdNode.class).capturedAs(GROUP_ID)))));
 
     private static final double GROUPING_SETS_SYMBOL_REQUIRED_FREQUENCY = 0.5;
+
+    private static boolean isPartialStep(AggregationNode.Step step)
+    {
+        // intermediate aggregation over GroupId, with rows pre-aggregated below GroupId (see PushPartialAggregationThroughGroupId)
+        return step == AggregationNode.Step.PARTIAL || step == AggregationNode.Step.INTERMEDIATE;
+    }
+
     private static final double ANTI_SKEWNESS_MARGIN = 3;
 
     private final PlannerContext plannerContext;
@@ -233,6 +240,14 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
                 return Optional.empty();
             }
 
+            // Statistics of the rows before pre-aggregation are used to estimate the effectiveness of the aggregation
+            PlanNode statsSource = groupId.getSource();
+            if (aggregation.getStep() == AggregationNode.Step.INTERMEDIATE &&
+                    context.getLookup().resolve(groupId.getSource()) instanceof AggregationNode preAggregation &&
+                    preAggregation.getStep().isOutputPartial()) {
+                statsSource = preAggregation.getSource();
+            }
+
             Set<Symbol> groupingKeys = aggregation.getGroupingKeys().stream()
                     .filter(symbol -> !groupId.getGroupIdSymbol().equals(symbol))
                     .collect(toImmutableSet());
@@ -247,7 +262,7 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
                 return Optional.empty();
             }
 
-            double aggregationMemoryRequirements = estimateAggregationMemoryRequirements(groupingKeys, groupId, groupingSetHistogram, context);
+            double aggregationMemoryRequirements = estimateAggregationMemoryRequirements(groupingKeys, groupId, statsSource, groupingSetHistogram, context);
             if (isNaN(aggregationMemoryRequirements) || aggregationMemoryRequirements < maxPartialAggregationMemoryUsage.toBytes()) {
                 // Aggregation will be effective even without exchanges (or we have insufficient information).
                 return Optional.empty();
@@ -265,7 +280,7 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
 
             // Use only the symbol with the highest cardinality (if we have statistics). This makes partial aggregation more efficient in case of
             // low correlation between symbol that are in every grouping set vs additional symbols.
-            PlanNodeStatsEstimate sourceStats = context.getStatsProvider().getStats(groupId.getSource());
+            PlanNodeStatsEstimate sourceStats = context.getStatsProvider().getStats(statsSource);
             desiredHashSymbols = desiredHashSymbols.stream()
                     .filter(symbol -> !isNaN(sourceStats.getSymbolStatistics(symbol).getDistinctValuesCount()))
                     .max(comparing(symbol -> sourceStats.getSymbolStatistics(symbol).getDistinctValuesCount()))
@@ -282,7 +297,7 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
                 return Optional.empty();
             }
 
-            double estimatedGroups = estimatedGroupCount(desiredHashSymbols, context.getStatsProvider().getStats(groupId.getSource()));
+            double estimatedGroups = estimatedGroupCount(desiredHashSymbols, sourceStats);
             if (isNaN(estimatedGroups) || estimatedGroups * ANTI_SKEWNESS_MARGIN < maximalConcurrencyAfterRepartition(context)) {
                 // Desired hash symbols form too few groups. Hashing over them would harm concurrency.
                 // TODO instead of taking symbols with >GROUPING_SETS_SYMBOL_REQUIRED_FREQUENCY presence, we could take symbols from high freq to low until there are enough groups
@@ -325,11 +340,11 @@ public class AddExchangesBelowPartialAggregationOverGroupIdRuleSet
             return getTaskConcurrency(context.getSession()) * taskCountEstimator.estimateHashedTaskCount(context.getSession());
         }
 
-        private double estimateAggregationMemoryRequirements(Set<Symbol> groupingKeys, GroupIdNode groupId, Multiset<Symbol> groupingSetHistogram, Context context)
+        private double estimateAggregationMemoryRequirements(Set<Symbol> groupingKeys, GroupIdNode groupId, PlanNode statsSource, Multiset<Symbol> groupingSetHistogram, Context context)
         {
             checkArgument(Objects.equals(groupingSetHistogram.elementSet(), groupingKeys)); // Otherwise math below would be off-topic
 
-            PlanNodeStatsEstimate sourceStats = context.getStatsProvider().getStats(groupId.getSource());
+            PlanNodeStatsEstimate sourceStats = context.getStatsProvider().getStats(statsSource);
             double keysMemoryRequirements = 0;
 
             for (List<Symbol> groupingSet : groupId.getGroupingSets()) {

@@ -36,6 +36,7 @@ import static io.trino.sql.planner.assertions.PlanMatchPattern.exchange;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.groupId;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.singleGroupingSet;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.values;
+import static io.trino.sql.planner.plan.AggregationNode.Step.INTERMEDIATE;
 import static io.trino.sql.planner.plan.AggregationNode.Step.PARTIAL;
 import static io.trino.sql.planner.plan.ExchangeNode.Scope.LOCAL;
 import static io.trino.sql.planner.plan.ExchangeNode.Scope.REMOTE;
@@ -121,6 +122,75 @@ public class TestAddExchangesBelowPartialAggregationOverGroupIdRuleSet
                                                             partitionedBy,
                                                             values("groupingKey1", "groupingKey2", "groupingKey3")))))));
         }
+    }
+
+    @Test
+    public void testAddExchangesBelowIntermediateAggregationOverPreAggregation()
+    {
+        RuleTester ruleTester = tester();
+        String preAggregationSourceId = "preAggregationSourceId";
+        ruleTester.assertThat(belowExchangeRule(ruleTester))
+                .overrideStats(preAggregationSourceId, PlanNodeStatsEstimate
+                        .builder()
+                        .setOutputRowCount(100_000_000)
+                        .addSymbolStatistics(ImmutableMap.of(
+                                new Symbol(BIGINT, "groupingKey1"), SymbolStatsEstimate.builder().setDistinctValuesCount(1000).build(),
+                                new Symbol(BIGINT, "groupingKey2"), SymbolStatsEstimate.builder().setDistinctValuesCount(10_000).build(),
+                                new Symbol(BIGINT, "groupingKey3"), SymbolStatsEstimate.builder().setDistinctValuesCount(1_000_000).build()))
+                        .build())
+                .on(p -> {
+                    Symbol groupingKey1 = p.symbol("groupingKey1", BIGINT);
+                    Symbol groupingKey2 = p.symbol("groupingKey2", BIGINT);
+                    Symbol groupingKey3 = p.symbol("groupingKey3", BIGINT);
+                    Symbol groupId = p.symbol("groupId", BIGINT);
+                    return p.exchange(
+                            exchangeBuilder -> exchangeBuilder
+                                    .scope(REMOTE)
+                                    .fixedArbitraryDistributionPartitioningScheme(ImmutableList.of(groupingKey1, groupingKey2, groupingKey3, groupId), 2)
+                                    .addInputsSet(groupingKey1, groupingKey2, groupingKey3, groupId)
+                                    .addSource(
+                                            p.aggregation(builder -> builder
+                                                    .singleGroupingSet(groupingKey1, groupingKey2, groupingKey3, groupId)
+                                                    .step(INTERMEDIATE)
+                                                    .source(p.groupId(
+                                                            ImmutableList.of(
+                                                                    ImmutableList.of(groupingKey1, groupingKey2),
+                                                                    ImmutableList.of(groupingKey1, groupingKey3)),
+                                                            ImmutableList.of(),
+                                                            groupId,
+                                                            p.aggregation(preAggregation -> preAggregation
+                                                                    .singleGroupingSet(groupingKey1, groupingKey2, groupingKey3)
+                                                                    .step(PARTIAL)
+                                                                    .source(p.values(new PlanNodeId(preAggregationSourceId), groupingKey1, groupingKey2, groupingKey3))))))));
+                })
+                .matches(exchange(
+                        REMOTE,
+                        aggregation(
+                                singleGroupingSet(ImmutableList.of("groupingKey1", "groupingKey2", "groupingKey3", "groupId")),
+                                ImmutableMap.of(),
+                                Optional.empty(),
+                                INTERMEDIATE,
+                                groupId(
+                                        ImmutableList.of(
+                                                ImmutableList.of("groupingKey1", "groupingKey2"),
+                                                ImmutableList.of("groupingKey1", "groupingKey3")),
+                                        "groupId",
+                                        exchange(
+                                                LOCAL,
+                                                REPARTITION,
+                                                ImmutableList.of(),
+                                                ImmutableSet.of("groupingKey3"),
+                                                exchange(
+                                                        REMOTE,
+                                                        REPARTITION,
+                                                        ImmutableList.of(),
+                                                        ImmutableSet.of("groupingKey3"),
+                                                        aggregation(
+                                                                singleGroupingSet(ImmutableList.of("groupingKey1", "groupingKey2", "groupingKey3")),
+                                                                ImmutableMap.of(),
+                                                                Optional.empty(),
+                                                                PARTIAL,
+                                                                values("groupingKey1", "groupingKey2", "groupingKey3"))))))));
     }
 
     private static AddExchangesBelowExchangePartialAggregationGroupId belowExchangeRule(RuleTester ruleTester)

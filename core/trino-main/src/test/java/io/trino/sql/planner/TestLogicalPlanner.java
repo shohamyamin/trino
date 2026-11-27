@@ -178,6 +178,7 @@ import static io.trino.sql.planner.assertions.PlanMatchPattern.valuesOf;
 import static io.trino.sql.planner.assertions.PlanMatchPattern.windowFunction;
 import static io.trino.sql.planner.optimizations.PlanNodeSearcher.searchFrom;
 import static io.trino.sql.planner.plan.AggregationNode.Step.FINAL;
+import static io.trino.sql.planner.plan.AggregationNode.Step.INTERMEDIATE;
 import static io.trino.sql.planner.plan.AggregationNode.Step.PARTIAL;
 import static io.trino.sql.planner.plan.AggregationNode.Step.SINGLE;
 import static io.trino.sql.planner.plan.ExchangeNode.Scope.LOCAL;
@@ -2561,6 +2562,27 @@ public class TestLogicalPlanner
                                                                         project(
                                                                                 ImmutableMap.of("CONSTANT", expression(new Constant(INTEGER, 1L))),
                                                                                 tableScan("orders"))))))))));
+    }
+
+    @Test
+    public void testPartialAggregationBelowGroupId()
+    {
+        assertDistributedPlan("SELECT orderstatus, orderpriority, sum(totalprice) FROM orders GROUP BY ROLLUP (orderstatus, orderpriority)",
+                anyTree(
+                        aggregation(
+                                ImmutableMap.of("intermediate_sum", aggregationFunction("sum", ImmutableList.of("partial_sum"))),
+                                INTERMEDIATE,
+                                groupId(
+                                        ImmutableList.of(ImmutableList.of(), ImmutableList.of("orderstatus"), ImmutableList.of("orderstatus", "orderpriority")),
+                                        ImmutableList.of("partial_sum"),
+                                        "group_id",
+                                        aggregation(
+                                                ImmutableMap.of("partial_sum", aggregationFunction("sum", ImmutableList.of("totalprice"))),
+                                                PARTIAL,
+                                                tableScan("orders", ImmutableMap.of(
+                                                        "orderstatus", "orderstatus",
+                                                        "orderpriority", "orderpriority",
+                                                        "totalprice", "totalprice")))))));
     }
 
     @Test

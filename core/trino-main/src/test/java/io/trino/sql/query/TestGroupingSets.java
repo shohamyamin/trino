@@ -52,6 +52,38 @@ public class TestGroupingSets
     }
 
     @Test
+    public void testRollupWithRepeatedGroups()
+    {
+        // Several input rows per group exercise pre-aggregation below GroupId
+        assertThat(assertions.query(
+                "SELECT a, b, grouping(a, b), count(*), count(x), sum(x), avg(x), max(s), sum(a), count(x) FILTER (WHERE x > 1) " +
+                        "FROM (VALUES " +
+                        "    (1, 'p', 1, 'k'), (1, 'p', 2, 'l'), (1, 'q', NULL, 'm'), (1, 'q', 3, NULL), " +
+                        "    (2, 'p', 4, 'n'), (2, 'p', 5, 'o'), (NULL, 'p', 6, 'p'), (NULL, NULL, 7, 'q'), (NULL, NULL, NULL, 'r')) t(a, b, x, s) " +
+                        "GROUP BY ROLLUP (a, b)"))
+                .matches("VALUES " +
+                        "(1, 'p', 0, BIGINT '2', BIGINT '2', BIGINT '3', 1.5e0, 'l', BIGINT '2', BIGINT '1'), " +
+                        "(1, 'q', 0, 2, 1, 3, 3.0e0, 'm', 2, 1), " +
+                        "(2, 'p', 0, 2, 2, 9, 4.5e0, 'o', 4, 2), " +
+                        "(NULL, 'p', 0, 1, 1, 6, 6.0e0, 'p', NULL, 1), " +
+                        "(NULL, NULL, 0, 2, 1, 7, 7.0e0, 'r', NULL, 1), " +
+                        "(1, NULL, 1, 4, 3, 6, 2.0e0, 'm', 4, 2), " +
+                        "(2, NULL, 1, 2, 2, 9, 4.5e0, 'o', 4, 2), " +
+                        "(NULL, NULL, 1, 3, 2, 13, 6.5e0, 'r', NULL, 2), " +
+                        "(NULL, NULL, 3, 9, 7, 28, 4.0e0, 'r', 8, 6)");
+
+        assertThat(assertions.query(
+                "SELECT a, b, count(*), sum(x) " +
+                        "FROM (VALUES (1, 1, 1), (1, 1, 2), (1, 2, 3), (2, 1, 4), (2, 1, 5)) t(a, b, x) " +
+                        "GROUP BY CUBE (a, b)"))
+                .matches("VALUES " +
+                        "(1, 1, BIGINT '2', BIGINT '3'), (1, 2, 1, 3), (2, 1, 2, 9), " +
+                        "(1, NULL, 3, 6), (2, NULL, 2, 9), " +
+                        "(NULL, 1, 4, 12), (NULL, 2, 1, 3), " +
+                        "(NULL, NULL, 5, 15)");
+    }
+
+    @Test
     public void testDistinctWithMixedReferences()
     {
         assertThat(assertions.query("" +

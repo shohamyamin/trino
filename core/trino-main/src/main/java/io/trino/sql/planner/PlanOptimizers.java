@@ -172,6 +172,7 @@ import io.trino.sql.planner.iterative.rule.PushMergeWriterDeleteIntoConnector;
 import io.trino.sql.planner.iterative.rule.PushMergeWriterUpdateIntoConnector;
 import io.trino.sql.planner.iterative.rule.PushOffsetThroughProject;
 import io.trino.sql.planner.iterative.rule.PushPartialAggregationThroughExchange;
+import io.trino.sql.planner.iterative.rule.PushPartialAggregationThroughGroupId;
 import io.trino.sql.planner.iterative.rule.PushPartialAggregationThroughJoin;
 import io.trino.sql.planner.iterative.rule.PushPredicateIntoTableScan;
 import io.trino.sql.planner.iterative.rule.PushPredicateThroughProjectIntoRowNumber;
@@ -1027,6 +1028,7 @@ public class PlanOptimizers
                 ImmutableSet.<Rule<?>>builder()
                         .addAll(new PushPartialAggregationThroughJoin().rules())
                         .addAll(new PushPartialAggregationThroughExchange(plannerContext).rules())
+                        .add(new PushPartialAggregationThroughGroupId())
                         .add(new PruneJoinColumns(),
                                 new PruneJoinChildrenColumns(),
                                 new RemoveRedundantIdentityProjections())
