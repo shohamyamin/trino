@@ -66,6 +66,7 @@ import io.trino.sql.planner.iterative.rule.ImplementTableFunctionSource;
 import io.trino.sql.planner.iterative.rule.InlineProjectIntoFilter;
 import io.trino.sql.planner.iterative.rule.InlineProjections;
 import io.trino.sql.planner.iterative.rule.LimitBoolOrAggregationSource;
+import io.trino.sql.planner.iterative.rule.MergeCrossJoinedGlobalAggregations;
 import io.trino.sql.planner.iterative.rule.MergeExcept;
 import io.trino.sql.planner.iterative.rule.MergeFilters;
 import io.trino.sql.planner.iterative.rule.MergeIntersect;
@@ -617,7 +618,17 @@ public class PlanOptimizers
                                 .addAll(new PushFilterThroughCountAggregation(plannerContext).rules()) // must run after PredicatePushDown and after TransformFilteringSemiJoinToInnerJoin
                                 .addAll(new PushFilterThroughBoolOrAggregation(plannerContext).rules())
                                 .add(new LimitBoolOrAggregationSource()) // must run after CheckSubqueryNodesAreRewritten
-                                .build()));
+                                .build()),
+                new IterativeOptimizer(
+                        "MergeCrossJoinedGlobalAggregations",
+                        plannerContext,
+                        ruleStats,
+                        statsCalculator,
+                        costCalculator,
+                        ImmutableSet.of(
+                                // must run after PredicatePushDown and before predicates are pushed into table scans
+                                new MergeCrossJoinedGlobalAggregations(),
+                                new RemoveRedundantIdentityProjections())));
 
         // Perform redirection before CBO rules to ensure stats from destination connector are used
         // Perform redirection before agg, topN, limit, sample etc. push down into table scan as the destination connector may support a different set of push downs

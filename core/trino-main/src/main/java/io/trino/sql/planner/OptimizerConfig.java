@@ -74,6 +74,7 @@ public class OptimizerConfig
     private MarkDistinctStrategy markDistinctStrategy;
     private DistinctAggregationsStrategy distinctAggregationsStrategy;
     private boolean preferPartialAggregation = true;
+    private boolean mergeCrossJoinedGlobalAggregations = true;
     private boolean pushAggregationThroughOuterJoin = true;
     private boolean enableIntermediateAggregations;
     private boolean pushPartialAggregationThroughJoin = true;
@@ -518,6 +519,19 @@ public class OptimizerConfig
     public OptimizerConfig setPreferPartialAggregation(boolean value)
     {
         this.preferPartialAggregation = value;
+        return this;
+    }
+
+    public boolean isMergeCrossJoinedGlobalAggregations()
+    {
+        return mergeCrossJoinedGlobalAggregations;
+    }
+
+    @Config("optimizer.merge-cross-joined-global-aggregations")
+    @ConfigDescription("Compute global aggregations over the same table that are cross joined, e.g. scalar subqueries, with a single scan of the table")
+    public OptimizerConfig setMergeCrossJoinedGlobalAggregations(boolean mergeCrossJoinedGlobalAggregations)
+    {
+        this.mergeCrossJoinedGlobalAggregations = mergeCrossJoinedGlobalAggregations;
         return this;
     }
 

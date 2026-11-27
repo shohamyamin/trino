@@ -129,6 +129,7 @@ public final class SystemSessionProperties
     public static final String MARK_DISTINCT_STRATEGY = "mark_distinct_strategy";
     public static final String DISTINCT_AGGREGATIONS_STRATEGY = "distinct_aggregations_strategy";
     public static final String PREFER_PARTIAL_AGGREGATION = "prefer_partial_aggregation";
+    public static final String MERGE_CROSS_JOINED_GLOBAL_AGGREGATIONS = "merge_cross_joined_global_aggregations";
     public static final String OPTIMIZE_TOP_N_RANKING = "optimize_top_n_ranking";
     public static final String MAX_GROUPING_SETS = "max_grouping_sets";
     public static final String ENABLE_STATS_CALCULATOR = "enable_stats_calculator";
@@ -617,6 +618,11 @@ public final class SystemSessionProperties
                         PREFER_PARTIAL_AGGREGATION,
                         "Prefer splitting aggregations into partial and final stages",
                         optimizerConfig.isPreferPartialAggregation(),
+                        false),
+                booleanProperty(
+                        MERGE_CROSS_JOINED_GLOBAL_AGGREGATIONS,
+                        "Compute global aggregations over the same table that are cross joined, e.g. scalar subqueries, with a single scan of the table",
+                        optimizerConfig.isMergeCrossJoinedGlobalAggregations(),
                         false),
                 booleanProperty(
                         OPTIMIZE_TOP_N_RANKING,
@@ -1516,6 +1522,11 @@ public final class SystemSessionProperties
     public static boolean preferPartialAggregation(Session session)
     {
         return session.getSystemProperty(PREFER_PARTIAL_AGGREGATION, Boolean.class);
+    }
+
+    public static boolean isMergeCrossJoinedGlobalAggregations(Session session)
+    {
+        return session.getSystemProperty(MERGE_CROSS_JOINED_GLOBAL_AGGREGATIONS, Boolean.class);
     }
 
     public static boolean isOptimizeTopNRanking(Session session)
