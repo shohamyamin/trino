@@ -31,9 +31,11 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
+import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -180,6 +182,100 @@ public class TestParquetDataSource
         inputStreams.get("3").getSlice(50);
         // no merged read due to max-merge-distance
         assertThat(memoryContext.getBytes()).isEqualTo(50);
+    }
+
+    @Test
+    public void testPrefetch()
+            throws IOException
+    {
+        Slice testingInput = createTestingInput();
+        TestingParquetDataSource dataSource = new TestingParquetDataSource(
+                testingInput,
+                ParquetReaderOptions.builder()
+                        .withMaxBufferSize(DataSize.ofBytes(500))
+                        .withMaxMergeDistance(DataSize.ofBytes(300))
+                        .build(),
+                Optional.of(directExecutor()));
+        AggregatedMemoryContext memoryContext = newSimpleAggregatedMemoryContext();
+        Map<String, ChunkedInputStream> inputStreams = dataSource.planRead(
+                ImmutableListMultimap.<String, DiskRange>builder()
+                        .put("1", new DiskRange(0, 200))
+                        .put("2", new DiskRange(400, 100))
+                        .put("3", new DiskRange(1100, 50))
+                        .put("4", new DiskRange(2000, 600))
+                        .put("5", new DiskRange(3000, 100))
+                        .build(),
+                memoryContext);
+        assertThat(memoryContext.getBytes()).isEqualTo(0);
+
+        // "1" and "2" share a merged range, "4" is split into two ranges, and only its first one is loaded
+        inputStreams.get("1").prefetch();
+        inputStreams.get("2").prefetch();
+        inputStreams.get("3").prefetch();
+        inputStreams.get("4").prefetch();
+        assertThat(dataSource.getConcurrentReads()).isEqualTo(3);
+        assertThat(memoryContext.getBytes()).isEqualTo(500 + 50 + 500);
+
+        assertThat(inputStreams.get("1").getSlice(200)).isEqualTo(testingInput.slice(0, 200));
+        assertThat(inputStreams.get("2").getSlice(100)).isEqualTo(testingInput.slice(400, 100));
+        assertThat(inputStreams.get("3").getSlice(50)).isEqualTo(testingInput.slice(1100, 50));
+        assertThat(inputStreams.get("4").getSlice(600)).isEqualTo(testingInput.slice(2000, 600));
+        // the second part of "4" is loaded in the background when its first part is read
+        assertThat(dataSource.getConcurrentReads()).isEqualTo(4);
+        assertThat(dataSource.getReads()).isEqualTo(0);
+        assertThat(dataSource.getReadBytes()).isEqualTo(500 + 50 + 600);
+
+        // a stream that has been read is not prefetched again
+        inputStreams.get("1").prefetch();
+        assertThat(dataSource.getConcurrentReads()).isEqualTo(4);
+
+        // freeing a prefetched range releases its memory
+        inputStreams.get("5").prefetch();
+        assertThat(dataSource.getConcurrentReads()).isEqualTo(5);
+        inputStreams.get("5").close();
+        inputStreams.get("1").close();
+        inputStreams.get("2").close();
+        inputStreams.get("3").close();
+        inputStreams.get("4").close();
+        assertThat(memoryContext.getBytes()).isEqualTo(0);
+    }
+
+    @Test
+    public void testPrefetchFailureFallsBackToRead()
+            throws IOException
+    {
+        Slice testingInput = createTestingInput();
+        TestingParquetDataSource dataSource = new TestingParquetDataSource(
+                testingInput,
+                ParquetReaderOptions.builder().build(),
+                Optional.of(directExecutor()));
+        dataSource.setFailConcurrentReads(true);
+        Map<String, ChunkedInputStream> inputStreams = dataSource.planRead(
+                ImmutableListMultimap.of("1", new DiskRange(100, 200)),
+                newSimpleAggregatedMemoryContext());
+
+        inputStreams.get("1").prefetch();
+        assertThat(dataSource.getConcurrentReads()).isEqualTo(1);
+        assertThat(inputStreams.get("1").getSlice(200)).isEqualTo(testingInput.slice(100, 200));
+        assertThat(dataSource.getReads()).isEqualTo(1);
+    }
+
+    @Test
+    public void testPrefetchWithoutExecutor()
+            throws IOException
+    {
+        Slice testingInput = createTestingInput();
+        TestingParquetDataSource dataSource = new TestingParquetDataSource(testingInput, ParquetReaderOptions.builder().build());
+        AggregatedMemoryContext memoryContext = newSimpleAggregatedMemoryContext();
+        Map<String, ChunkedInputStream> inputStreams = dataSource.planRead(
+                ImmutableListMultimap.of("1", new DiskRange(100, 200)),
+                memoryContext);
+
+        inputStreams.get("1").prefetch();
+        assertThat(memoryContext.getBytes()).isEqualTo(0);
+        assertThat(dataSource.getConcurrentReads()).isEqualTo(0);
+        assertThat(inputStreams.get("1").getSlice(200)).isEqualTo(testingInput.slice(100, 200));
+        assertThat(dataSource.getReads()).isEqualTo(1);
     }
 
     private static Slice createTestingInput()

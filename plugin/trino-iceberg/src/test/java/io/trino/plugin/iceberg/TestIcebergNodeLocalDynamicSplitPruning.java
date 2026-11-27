@@ -596,6 +596,7 @@ public class TestIcebergNodeLocalDynamicSplitPruning
                 blocksHashFactory,
                 icebergConfig,
                 ENCRYPTION_MANAGER_FACTORY,
+                newDirectExecutorService(),
                 newDirectExecutorService());
         return factory.createPageSourceProvider(MemoryContext.NO_LIMIT).createPageSource(
                 transaction,

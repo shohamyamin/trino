@@ -271,6 +271,7 @@ public class IcebergPageSourceProvider
     private final Map<Integer, Function<PartitionData, PartitionKey>> partitionKeyFactories = new ConcurrentHashMap<>();
     private final Map<PartitionKey, DeleteManager> partitionedDeleteManagers = new ConcurrentHashMap<>();
     private final Executor deleteLoadingExecutor;
+    private final Optional<Executor> parquetPrefetchExecutor;
 
     public IcebergPageSourceProvider(
             IcebergFileSystemFactory fileSystemFactory,
@@ -286,6 +287,38 @@ public class IcebergPageSourceProvider
             int domainCompactionThreshold,
             Executor deleteLoadingExecutor)
     {
+        this(
+                fileSystemFactory,
+                fileIoFactory,
+                fileFormatDataSourceStats,
+                orcReaderOptions,
+                parquetReaderOptions,
+                typeManager,
+                parquetFooterCache,
+                blocksHashFactory,
+                encryptionManagerFactory,
+                sharedMemoryContext,
+                domainCompactionThreshold,
+                deleteLoadingExecutor,
+                Optional.empty());
+    }
+
+    public IcebergPageSourceProvider(
+            IcebergFileSystemFactory fileSystemFactory,
+            ForwardingFileIoFactory fileIoFactory,
+            FileFormatDataSourceStats fileFormatDataSourceStats,
+            OrcReaderOptions orcReaderOptions,
+            ParquetReaderOptions parquetReaderOptions,
+            TypeManager typeManager,
+            ParquetFooterCache parquetFooterCache,
+            BlocksHashFactory blocksHashFactory,
+            EncryptionManagerFactory encryptionManagerFactory,
+            MemoryContext sharedMemoryContext,
+            int domainCompactionThreshold,
+            Executor deleteLoadingExecutor,
+            Optional<Executor> parquetPrefetchExecutor)
+    {
+        this.parquetPrefetchExecutor = requireNonNull(parquetPrefetchExecutor, "parquetPrefetchExecutor is null");
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.fileIoFactory = requireNonNull(fileIoFactory, "fileIoFactory is null");
         this.fileFormatDataSourceStats = requireNonNull(fileFormatDataSourceStats, "fileFormatDataSourceStats is null");
@@ -719,7 +752,8 @@ public class IcebergPageSourceProvider
                     dataSequenceNumber,
                     fileFirstRowId,
                     memoryContext,
-                    parquetFileDecryptionProperties);
+                    parquetFileDecryptionProperties,
+                    parquetPrefetchExecutor);
             case AVRO -> createAvroPageSource(
                     inputFile,
                     start,
@@ -1180,11 +1214,12 @@ public class IcebergPageSourceProvider
             OptionalLong dataSequenceNumber,
             OptionalLong fileFirstRowId,
             AggregatedMemoryContext memoryContext,
-            Optional<FileDecryptionProperties> parquetFileDecryptionProperties)
+            Optional<FileDecryptionProperties> parquetFileDecryptionProperties,
+            Optional<Executor> prefetchExecutor)
     {
         ParquetDataSource dataSource = null;
         try {
-            dataSource = createDataSource(inputFile, OptionalLong.of(fileSize), options, memoryContext, fileFormatDataSourceStats);
+            dataSource = createDataSource(inputFile, OptionalLong.of(fileSize), options, memoryContext, fileFormatDataSourceStats, prefetchExecutor);
             ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, options, Optional.empty(), parquetFileDecryptionProperties, parquetFooterCache, new ParquetFooterCacheKey(inputFile.location().toString(), fileSize));
             FileMetadata fileMetaData = parquetMetadata.getFileMetaData();
             MessageType fileSchema = fileMetaData.getSchema();

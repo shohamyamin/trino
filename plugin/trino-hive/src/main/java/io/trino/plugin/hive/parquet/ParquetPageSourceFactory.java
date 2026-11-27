@@ -79,6 +79,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.Executor;
 import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -323,8 +324,20 @@ public class ParquetPageSourceFactory
             FileFormatDataSourceStats stats)
             throws IOException
     {
+        return createDataSource(inputFile, estimatedFileSize, options, memoryContext, stats, Optional.empty());
+    }
+
+    public static ParquetDataSource createDataSource(
+            TrinoInputFile inputFile,
+            OptionalLong estimatedFileSize,
+            ParquetReaderOptions options,
+            AggregatedMemoryContext memoryContext,
+            FileFormatDataSourceStats stats,
+            Optional<Executor> prefetchExecutor)
+            throws IOException
+    {
         if (estimatedFileSize.isEmpty() || estimatedFileSize.orElseThrow() > options.getSmallFileThreshold().toBytes()) {
-            return new TrinoParquetDataSource(inputFile, options, stats);
+            return new TrinoParquetDataSource(inputFile, options, stats, prefetchExecutor);
         }
         return new MemoryParquetDataSource(inputFile, memoryContext, stats);
     }

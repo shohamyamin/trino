@@ -1091,7 +1091,20 @@ public class ParquetReader
         }
         nextRowInGroup = 0L;
         initializeColumnReaders();
+        prefetchCurrentRowGroup();
         return true;
+    }
+
+    private void prefetchCurrentRowGroup()
+    {
+        // Columns are read one after another as they are first used. Start loading all of them now,
+        // so that their reads overlap instead of each waiting for the previous one.
+        for (PrimitiveField field : primitiveFields) {
+            ChunkedInputStream chunkedStream = chunkReaders.get(new ChunkKey(field.getId(), currentRowGroup));
+            if (chunkedStream != null) {
+                chunkedStream.prefetch();
+            }
+        }
     }
 
     private void freeCurrentRowGroupBuffers()
