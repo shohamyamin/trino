@@ -60,19 +60,16 @@ public interface GroupByHash
             return true;
         }
 
-        int variableWidthTypes = 0;
         for (Type type : types) {
             // The presence of any container types should trigger hash value caching since computing the hash and
             // checking valueIdentical is so much more expensive for these values
             if (type instanceof MapType || type instanceof ArrayType || type instanceof RowType) {
                 return true;
             }
-            // Cache hash values when more than 2 or more variable width types are present
+            // Hashing a variable width value reads all of it, and comparing it reads it from the variable width data,
+            // so caching the hash value pays off on rehashing and on comparing candidate groups of large tables
             if (type.isFlatVariableWidth()) {
-                variableWidthTypes++;
-                if (variableWidthTypes >= 2) {
-                    return true;
-                }
+                return true;
             }
         }
         // All remaining scenarios will use re-compute the hash on-demand during rehashing
