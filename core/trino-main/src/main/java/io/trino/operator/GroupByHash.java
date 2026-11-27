@@ -26,7 +26,6 @@ import io.trino.spi.type.Type;
 import java.util.List;
 
 import static io.trino.SystemSessionProperties.isDictionaryAggregationEnabled;
-import static io.trino.spi.type.BigintType.BIGINT;
 
 @NotThreadSafe
 public interface GroupByHash
@@ -87,8 +86,8 @@ public interface GroupByHash
             FlatHashStrategyCompiler hashStrategyCompiler,
             UpdateMemory updateMemory)
     {
-        if (types.size() == 1 && types.get(0).equals(BIGINT)) {
-            return new BigintGroupByHash(expectedSize, updateMemory);
+        if (types.size() == 1 && BigintGroupByHash.isSupportedType(types.getFirst())) {
+            return new BigintGroupByHash(types.getFirst(), expectedSize, updateMemory);
         }
         return new FlatGroupByHash(
                 types,

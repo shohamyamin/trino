@@ -20,6 +20,7 @@ import io.trino.block.BlockAssertions;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.DictionaryBlock;
 import io.trino.spi.block.LongArrayBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
@@ -43,6 +44,12 @@ import static io.trino.operator.GroupByHash.createGroupByHash;
 import static io.trino.operator.GroupByHash.shouldCacheHashValue;
 import static io.trino.operator.UpdateMemory.NOOP;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DateType.DATE;
+import static io.trino.spi.type.DecimalType.createDecimalType;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TimestampType.createTimestampType;
+import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -68,7 +75,7 @@ public class TestGroupByHash
         public GroupByHash createGroupByHash(int expectedSize, UpdateMemory updateMemory)
         {
             return switch (this) {
-                case BIGINT -> new BigintGroupByHash(expectedSize, updateMemory);
+                case BIGINT -> new BigintGroupByHash(BigintType.BIGINT, expectedSize, updateMemory);
                 case FLAT -> new FlatGroupByHash(
                         ImmutableList.of(BigintType.BIGINT),
                         false,
@@ -104,6 +111,39 @@ public class TestGroupByHash
                     }
                 }
             }
+        }
+    }
+
+    @Test
+    public void testNumericTypes()
+    {
+        List<Type> types = ImmutableList.of(INTEGER, SMALLINT, TINYINT, DATE, createTimestampType(6), createDecimalType(10, 2));
+        for (Type type : types) {
+            GroupByHash groupByHash = createGroupByHash(ImmutableList.of(type), false, 1, false, new FlatHashStrategyCompiler(new TypeOperators(), new NullSafeHashCompiler(new TypeOperators())), NOOP);
+            assertThat(groupByHash).isInstanceOf(BigintGroupByHash.class);
+
+            BlockBuilder blockBuilder = type.createBlockBuilder(null, 6);
+            type.writeLong(blockBuilder, -1);
+            type.writeLong(blockBuilder, 7);
+            blockBuilder.appendNull();
+            type.writeLong(blockBuilder, -1);
+            type.writeLong(blockBuilder, 0);
+            type.writeLong(blockBuilder, 7);
+            Block block = blockBuilder.build();
+
+            assertThat(getGroupIds(groupByHash, new Page(block))).containsExactly(0, 1, 2, 0, 3, 1);
+            int[] ids = {4, 1, 2, 3};
+            assertThat(getGroupIds(groupByHash, new Page(DictionaryBlock.create(ids.length, block, ids)))).containsExactly(3, 1, 2, 0);
+            assertThat(getGroupIds(groupByHash, new Page(RunLengthEncodedBlock.create(block.getRegion(1, 1), 3)))).containsExactly(1, 1, 1);
+            assertThat(groupByHash.getGroupCount()).isEqualTo(4);
+
+            PageBuilder pageBuilder = new PageBuilder(ImmutableList.of(type));
+            for (int groupId = 0; groupId < groupByHash.getGroupCount(); groupId++) {
+                pageBuilder.declarePosition();
+                groupByHash.appendValuesTo(groupId, pageBuilder);
+            }
+            int[] firstPositions = {0, 1, 2, 4};
+            BlockAssertions.assertBlockEquals(type, pageBuilder.build().getBlock(0), block.copyPositions(firstPositions, 0, firstPositions.length));
         }
     }
 

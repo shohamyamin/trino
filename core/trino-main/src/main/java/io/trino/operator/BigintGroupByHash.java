@@ -19,9 +19,17 @@ import io.trino.spi.PageBuilder;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
+import io.trino.spi.block.ByteArrayBlock;
 import io.trino.spi.block.DictionaryBlock;
+import io.trino.spi.block.IntArrayBlock;
+import io.trino.spi.block.LongArrayBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
+import io.trino.spi.block.ShortArrayBlock;
+import io.trino.spi.block.ValueBlock;
 import io.trino.spi.type.BigintType;
+import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.TimestampType;
+import io.trino.spi.type.Type;
 
 import java.util.Arrays;
 
@@ -32,12 +40,20 @@ import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static io.trino.spi.StandardErrorCode.GENERIC_INSUFFICIENT_RESOURCES;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DateType.DATE;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TinyintType.TINYINT;
 import static it.unimi.dsi.fastutil.HashCommon.arraySize;
 import static it.unimi.dsi.fastutil.HashCommon.murmurHash3;
 import static java.lang.Math.min;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
+/**
+ * Group by hash for a single key of a type whose values are stored as numbers in fixed width blocks,
+ * and are equal exactly when the numbers are equal.
+ */
 public class BigintGroupByHash
         implements GroupByHash
 {
@@ -45,6 +61,8 @@ public class BigintGroupByHash
     private static final int BATCH_SIZE = 1024;
 
     private static final float FILL_RATIO = 0.75f;
+
+    private final Type type;
 
     private int hashCapacity;
     private int maxFill;
@@ -68,9 +86,11 @@ public class BigintGroupByHash
     private long preallocatedMemoryInBytes;
     private long currentPageSizeInBytes;
 
-    public BigintGroupByHash(int expectedSize, UpdateMemory updateMemory)
+    public BigintGroupByHash(Type type, int expectedSize, UpdateMemory updateMemory)
     {
+        checkArgument(isSupportedType(type), "Unsupported type: %s", type);
         checkArgument(expectedSize > 0, "expectedSize must be greater than zero");
+        this.type = type;
 
         hashCapacity = arraySize(expectedSize, FILL_RATIO);
 
@@ -89,6 +109,7 @@ public class BigintGroupByHash
 
     private BigintGroupByHash(BigintGroupByHash other)
     {
+        type = other.type;
         hashCapacity = other.hashCapacity;
         maxFill = other.maxFill;
         mask = other.mask;
@@ -135,7 +156,7 @@ public class BigintGroupByHash
             blockBuilder.appendNull();
         }
         else {
-            BIGINT.writeLong(blockBuilder, valuesByGroupId[groupId]);
+            type.writeLong(blockBuilder, valuesByGroupId[groupId]);
         }
     }
 
@@ -199,7 +220,7 @@ public class BigintGroupByHash
             return nullGroupId;
         }
 
-        long value = BIGINT.getLong(block, position);
+        long value = getValue(block, position);
         int hashPosition = getHashPosition(value, mask);
 
         // look for an empty slot or a slot containing this key
@@ -218,6 +239,36 @@ public class BigintGroupByHash
         }
 
         return addNewGroup(hashPosition, value);
+    }
+
+    public static boolean isSupportedType(Type type)
+    {
+        return type.equals(BIGINT)
+                || type.equals(INTEGER)
+                || type.equals(SMALLINT)
+                || type.equals(TINYINT)
+                || type.equals(DATE)
+                || (type instanceof TimestampType timestampType && timestampType.isShort())
+                || (type instanceof DecimalType decimalType && decimalType.isShort());
+    }
+
+    private static long getValue(Block block, int position)
+    {
+        ValueBlock valueBlock = block.getUnderlyingValueBlock();
+        int valuePosition = block.getUnderlyingValuePosition(position);
+        if (valueBlock instanceof LongArrayBlock longArrayBlock) {
+            return longArrayBlock.getLong(valuePosition);
+        }
+        if (valueBlock instanceof IntArrayBlock intArrayBlock) {
+            return intArrayBlock.getInt(valuePosition);
+        }
+        if (valueBlock instanceof ShortArrayBlock shortArrayBlock) {
+            return shortArrayBlock.getShort(valuePosition);
+        }
+        if (valueBlock instanceof ByteArrayBlock byteArrayBlock) {
+            return byteArrayBlock.getByte(valuePosition);
+        }
+        throw new IllegalArgumentException("Unsupported block: " + valueBlock.getClass().getName());
     }
 
     private int addNewGroup(int hashPosition, long value)
