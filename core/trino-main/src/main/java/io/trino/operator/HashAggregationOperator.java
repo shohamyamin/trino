@@ -44,6 +44,8 @@ import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.memory.context.CoarseGrainLocalMemoryContext.DEFAULT_GRANULARITY;
 import static io.trino.operator.aggregation.builder.InMemoryHashAggregationBuilder.toTypes;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static java.lang.Math.max;
+import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
 public class HashAggregationOperator
@@ -280,6 +282,8 @@ public class HashAggregationOperator
     private long aggregationInputBytesProcessed;
     private long aggregationInputRowsProcessed;
     private long aggregationUniqueRowsProduced;
+    // expected groups of the next in-memory builder, raised after each partial aggregation flush
+    private int nextExpectedGroups;
 
     private HashAggregationOperator(
             OperatorContext operatorContext,
@@ -315,6 +319,7 @@ public class HashAggregationOperator
         this.step = step;
         this.produceDefaultOutput = produceDefaultOutput;
         this.expectedGroups = expectedGroups;
+        this.nextExpectedGroups = expectedGroups;
         this.maxPartialMemory = requireNonNull(maxPartialMemory, "maxPartialMemory is null");
         this.spillEnabled = spillEnabled;
         this.memoryLimitForMerge = requireNonNull(memoryLimitForMerge, "memoryLimitForMerge is null");
@@ -405,7 +410,7 @@ public class HashAggregationOperator
                 aggregationBuilder = new InMemoryHashAggregationBuilder(
                         aggregatorFactories,
                         step,
-                        expectedGroups,
+                        nextExpectedGroups,
                         groupByTypes,
                         groupByChannels,
                         false, // spillable
@@ -550,6 +555,13 @@ public class HashAggregationOperator
         aggregationUniqueRowsProduced = 0;
 
         operatorContext.setLatestMetrics(aggregationMetrics.getMetrics());
+
+        if (step.isOutputPartial() && aggregationBuilder instanceof InMemoryHashAggregationBuilder inMemoryAggregationBuilder) {
+            // A partial aggregation is usually flushed right after a hash table resize pushes it over the memory limit.
+            // Three quarters of the flushed group count sizes the next hash table to the capacity before that resize,
+            // so the next builder does not repeat every resize from the initial expected groups.
+            nextExpectedGroups = toIntExact(max(expectedGroups, inMemoryAggregationBuilder.getGroupCount() * 3 / 4));
+        }
 
         outputPages = null;
         if (aggregationBuilder != null) {

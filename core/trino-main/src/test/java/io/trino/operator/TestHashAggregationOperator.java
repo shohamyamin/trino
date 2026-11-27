@@ -839,6 +839,59 @@ public class TestHashAggregationOperator
     }
 
     @Test
+    public void testPartialFlushKeepsHashCapacity()
+            throws Exception
+    {
+        RowPagesBuilder rowPagesBuilder = rowPagesBuilder(BIGINT);
+        for (int i = 0; i < 20; i++) {
+            rowPagesBuilder.addSequencePage(1000, i * 1000);
+        }
+        List<Page> input = rowPagesBuilder.build();
+
+        HashAggregationOperatorFactory operatorFactory = new HashAggregationOperatorFactory(
+                0,
+                new PlanNodeId("test"),
+                ImmutableList.of(BIGINT),
+                Ints.asList(0),
+                ImmutableList.of(),
+                PARTIAL,
+                ImmutableList.of(),
+                OptionalInt.empty(),
+                1,
+                Optional.of(DataSize.of(256, KILOBYTE)),
+                hashStrategyCompiler,
+                Optional.empty());
+
+        DriverContext driverContext = createDriverContext(1024);
+
+        try (Operator operator = operatorFactory.createOperator(driverContext)) {
+            Iterator<Page> inputIterator = input.iterator();
+            while (operator.needsInput() && inputIterator.hasNext()) {
+                operator.addInput(inputIterator.next());
+            }
+            int capacityAtFlush = getHashCapacity(operator);
+
+            List<Page> outputPages = new ArrayList<>();
+            for (Page output = operator.getOutput(); output != null; output = operator.getOutput()) {
+                outputPages.add(output);
+            }
+            assertThat(outputPages).isNotEmpty();
+            assertThat(operator.needsInput()).isTrue();
+
+            // the builder created after the flush starts at the capacity used before the resize that filled the previous one
+            operator.addInput(inputIterator.next());
+            assertThat(getHashCapacity(operator)).isEqualTo(capacityAtFlush / 2);
+
+            outputPages.addAll(toPages(operator, inputIterator));
+            MaterializedResult expected = resultBuilder(BIGINT)
+                    .pages(rowPagesBuilder(BIGINT).addSequencePage(20_000, 0).build())
+                    .build();
+            MaterializedResult actual = toMaterializedResult(expected.getTypes(), outputPages);
+            assertEqualsIgnoreOrder(actual.getMaterializedRows(), expected.getMaterializedRows());
+        }
+    }
+
+    @Test
     public void testMergeWithMemorySpill()
     {
         DummySpillerFactory spillerFactory = new DummySpillerFactory();
