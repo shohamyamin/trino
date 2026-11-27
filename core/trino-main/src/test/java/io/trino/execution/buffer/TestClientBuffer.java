@@ -42,6 +42,7 @@ import static io.trino.execution.buffer.BufferTestUtils.createPage;
 import static io.trino.execution.buffer.BufferTestUtils.getFuture;
 import static io.trino.execution.buffer.BufferTestUtils.serializePage;
 import static io.trino.execution.buffer.BufferTestUtils.sizeOfPages;
+import static io.trino.execution.buffer.BufferTestUtils.withBufferComplete;
 import static io.trino.execution.buffer.SerializedPageReference.dereferencePages;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static java.util.Objects.requireNonNull;
@@ -98,8 +99,8 @@ public class TestClientBuffer
         assertBufferResultEquals(TYPES, getBufferResult(buffer, 4, sizeOfPages(1), NO_WAIT), bufferResult(4, createPage(4)));
         assertBufferInfo(buffer, 2, 4);
 
-        // remove last pages from, should not be finished
-        assertBufferResultEquals(TYPES, getBufferResult(buffer, 5, sizeOfPages(30), NO_WAIT), bufferResult(5, createPage(5)));
+        // remove last pages, buffer is complete since no more pages will be added
+        assertBufferResultEquals(TYPES, getBufferResult(buffer, 5, sizeOfPages(30), NO_WAIT), withBufferComplete(bufferResult(5, createPage(5))));
         assertBufferInfo(buffer, 1, 5);
 
         // acknowledge all pages from the buffer, should return a finished buffer result
@@ -160,8 +161,8 @@ public class TestClientBuffer
         assertBufferInfo(buffer, 1, 4);
         assertThat(supplier.getBufferedPages()).isEqualTo(1);
 
-        // remove last pages from, should not be finished
-        assertBufferResultEquals(TYPES, getBufferResult(buffer, supplier, 5, sizeOfPages(30), NO_WAIT), bufferResult(5, createPage(5)));
+        // remove last pages, buffer is complete since no more pages will be added
+        assertBufferResultEquals(TYPES, getBufferResult(buffer, supplier, 5, sizeOfPages(30), NO_WAIT), withBufferComplete(bufferResult(5, createPage(5))));
         assertBufferInfo(buffer, 1, 5);
         assertThat(supplier.getBufferedPages()).isEqualTo(0);
 

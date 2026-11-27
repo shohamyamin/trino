@@ -57,6 +57,7 @@ import static io.trino.execution.buffer.BufferTestUtils.createPage;
 import static io.trino.execution.buffer.BufferTestUtils.getFuture;
 import static io.trino.execution.buffer.BufferTestUtils.serializePage;
 import static io.trino.execution.buffer.BufferTestUtils.sizeOfPages;
+import static io.trino.execution.buffer.BufferTestUtils.withBufferComplete;
 import static io.trino.execution.buffer.PipelinedOutputBuffers.BROADCAST_PARTITION_ID;
 import static io.trino.execution.buffer.PipelinedOutputBuffers.BufferType.ARBITRARY;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
@@ -911,8 +912,8 @@ public class TestArbitraryOutputBuffer
 
         buffer.setNoMorePages();
 
-        // get and acknowledge 5 pages
-        assertBufferResultEquals(TYPES, getBufferResult(buffer, FIRST, 0, sizeOfPages(5), MAX_WAIT), createBufferResult(TASK_INSTANCE_ID, 0, pages));
+        // get and acknowledge 5 pages, which are all remaining pages
+        assertBufferResultEquals(TYPES, getBufferResult(buffer, FIRST, 0, sizeOfPages(5), MAX_WAIT), withBufferComplete(createBufferResult(TASK_INSTANCE_ID, 0, pages)));
 
         // there are no more pages and no more buffers, but buffer is not finished because it didn't receive an acknowledgement yet
         assertThat(buffer.getState()).isEqualTo(FLUSHING);
@@ -962,7 +963,7 @@ public class TestArbitraryOutputBuffer
         assertThat(buffer.getState()).isEqualTo(NO_MORE_PAGES);
 
         // read remaining pages from the first buffer and acknowledge
-        assertBufferResultEquals(TYPES, getBufferResult(buffer, FIRST, 1, sizeOfPages(10), NO_WAIT), bufferResult(1, createPage(1), createPage(2)));
+        assertBufferResultEquals(TYPES, getBufferResult(buffer, FIRST, 1, sizeOfPages(10), NO_WAIT), withBufferComplete(bufferResult(1, createPage(1), createPage(2))));
         assertBufferResultEquals(TYPES, getBufferResult(buffer, FIRST, 3, sizeOfPages(1), NO_WAIT), emptyResults(TASK_INSTANCE_ID, 3, true));
         assertThat(buffer.getState()).isEqualTo(NO_MORE_PAGES);
 

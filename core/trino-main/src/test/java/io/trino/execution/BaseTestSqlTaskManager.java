@@ -146,15 +146,10 @@ public abstract class BaseTestSqlTaskManager
             assertThat(taskInfo.taskStatus().state()).isEqualTo(TaskState.FLUSHING);
 
             BufferResult results = sqlTaskManager.getTaskResults(taskId, OUT, 0, DataSize.of(1, Unit.MEGABYTE)).getResultsFuture().get();
-            assertThat(results.bufferComplete()).isFalse();
+            // the task is flushing, so the last page is returned with the buffer complete signal
+            assertThat(results.bufferComplete()).isTrue();
             assertThat(results.serializedPages()).hasSize(1);
             assertThat(getSerializedPagePositionCount(results.serializedPages().get(0))).isEqualTo(1);
-
-            for (boolean moreResults = true; moreResults; moreResults = !results.bufferComplete()) {
-                results = sqlTaskManager.getTaskResults(taskId, OUT, results.token() + results.serializedPages().size(), DataSize.of(1, Unit.MEGABYTE)).getResultsFuture().get();
-            }
-            assertThat(results.bufferComplete()).isTrue();
-            assertThat(results.serializedPages()).isEmpty();
 
             // complete the task by calling destroy on it
             TaskInfo info = sqlTaskManager.destroyTaskResults(taskId, OUT);

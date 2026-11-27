@@ -407,6 +407,8 @@ public class DirectExchangeClient
     {
         requireNonNull(client, "client is null");
         if (completedClients.add(client)) {
+            // the last request of the client, which returned the buffer complete signal, is complete
+            requestDuration.add(client.getLastRequestDurationMillis());
             runningClients.remove(client);
             buffer.taskFinished(client.getRemoteTaskId());
         }

@@ -179,9 +179,9 @@ public class TestDirectExchangeClient
         DirectExchangeClientStatus status = exchangeClient.getStatus();
         assertThat(status.getBufferedPages()).isEqualTo(0);
 
-        // client should have sent only 3 requests: one to get all pages, one to acknowledge and one to get the done signal
-        assertStatus(getOnlyElement(status.getPageBufferClientStatuses()), location, "closed", 3, 3, 3, "not scheduled");
-        assertThat(status.getRequestDuration().getDigest().getCount()).isEqualTo(2.0);
+        // client should have sent only 2 requests: one to get all pages with the done signal and one to destroy the buffer
+        assertEventually(() -> assertStatus(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()), location, "closed", 3, 2, 2, "not scheduled"));
+        assertThat(status.getRequestDuration().getDigest().getCount()).isEqualTo(1.0);
 
         exchangeClient.close();
 
@@ -237,8 +237,8 @@ public class TestDirectExchangeClient
         DirectExchangeClientStatus status = exchangeClient.getStatus();
         assertThat(status.getBufferedPages()).isEqualTo(0);
 
-        // client should have sent only 3 requests: one to get all pages, one to acknowledge and one to get the done signal
-        assertStatus(getOnlyElement(status.getPageBufferClientStatuses()), location, "closed", 3, 3, 3, "not scheduled");
+        // client should have sent only 2 requests: one to get all pages with the done signal and one to destroy the buffer
+        assertEventually(() -> assertStatus(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()), location, "closed", 3, 2, 2, "not scheduled"));
 
         exchangeClient.close();
     }
@@ -423,9 +423,11 @@ public class TestDirectExchangeClient
         }
         exchangeClient.close();
 
-        Map<URI, PageBufferClientStatus> statuses = uniqueIndex(exchangeClient.getStatus().getPageBufferClientStatuses(), PageBufferClientStatus::getUri);
-        assertStatus(statuses.get(location1), location1, "closed", 3, 3, 3, "not scheduled");
-        assertStatus(statuses.get(location2), location2, "closed", 3, 3, 3, "not scheduled");
+        assertEventually(() -> {
+            Map<URI, PageBufferClientStatus> statuses = uniqueIndex(exchangeClient.getStatus().getPageBufferClientStatuses(), PageBufferClientStatus::getUri);
+            assertStatus(statuses.get(location1), location1, "closed", 3, 2, 2, "not scheduled");
+            assertStatus(statuses.get(location2), location2, "closed", 3, 2, 2, "not scheduled");
+        });
     }
 
     @Test
@@ -827,8 +829,8 @@ public class TestDirectExchangeClient
         }
         while (exchangeClient.getStatus().getBufferedPages() == 0);
 
-        // client should have sent a single request for a single page
-        assertStatus(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()), location, "queued", 3, 3, 3, "not scheduled");
+        // client should have sent a single request for the last page, which also returned the done signal, and destroyed the buffer
+        assertEventually(() -> assertStatus(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()), location, "closed", 3, 4, 4, "not scheduled"));
         assertThat(exchangeClient.getStatus().getBufferedPages()).isEqualTo(1);
         assertThat(exchangeClient.getStatus().getBufferedBytes() > 0).isTrue();
 
@@ -840,7 +842,7 @@ public class TestDirectExchangeClient
         assertThat(exchangeClient.getStatus().getBufferedPages()).isEqualTo(0);
         assertThat(exchangeClient.isFinished()).isTrue();
         exchangeClient.close();
-        assertStatus(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()), location, "closed", 3, 5, 5, "not scheduled");
+        assertStatus(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()), location, "closed", 3, 4, 4, "not scheduled");
     }
 
     @Test
@@ -874,7 +876,7 @@ public class TestDirectExchangeClient
         assertThat(status.getBufferedPages()).isEqualTo(0);
         assertThat(status.getBufferedBytes()).isEqualTo(0);
 
-        assertStatus(getOnlyElement(status.getPageBufferClientStatuses()), location, "closed", 2, 4, 4, "not scheduled");
+        assertEventually(() -> assertStatus(getOnlyElement(exchangeClient.getStatus().getPageBufferClientStatuses()), location, "closed", 2, 3, 3, "not scheduled"));
     }
 
     private DirectExchangeClient setUpDataCorruption(DataIntegrityVerification dataIntegrityVerification, URI location)

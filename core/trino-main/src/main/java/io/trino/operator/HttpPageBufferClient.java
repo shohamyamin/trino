@@ -153,6 +153,9 @@ public final class HttpPageBufferClient
     private boolean scheduled;
     @GuardedBy("this")
     private boolean completed;
+    // all pages were received and clientFinished was reported before the remote buffer was destroyed
+    @GuardedBy("this")
+    private boolean finishReported;
     @GuardedBy("this")
     private String taskInstanceId;
     private volatile long lastRequestStartNanos;
@@ -306,10 +309,15 @@ public final class HttpPageBufferClient
             closed = true;
 
             future = this.future;
+            lastUpdate = Instant.now();
+
+            if (finishReported && future != null && !future.isDone()) {
+                // only delete requests are sent after the finish is reported, and the
+                // in-flight one destroys the task results on the remote node
+                return;
+            }
 
             this.future = null;
-
-            lastUpdate = Instant.now();
         }
 
         if (future != null && !future.isDone()) {
@@ -475,15 +483,29 @@ public final class HttpPageBufferClient
                 long responseSize = pages.stream().mapToLong(Slice::length).sum();
                 requestSucceeded(responseSize);
 
+                boolean reportFinish;
                 synchronized (HttpPageBufferClient.this) {
                     // client is complete, acknowledge it by sending it a delete in the next request
                     if (result.isClientComplete()) {
                         completed = true;
                     }
+                    reportFinish = completed && pagesAccepted && !finishReported;
+                    if (reportFinish) {
+                        finishReported = true;
+                    }
                     if (future == resultFuture) {
                         future = null;
                     }
                     lastUpdate = Instant.now();
+                }
+                if (reportFinish) {
+                    // All pages have been received, so the client is finished. Report this
+                    // right away, instead of after the remote buffer has been destroyed, so the
+                    // consumer does not wait for one more round trip. The delete request
+                    // that destroys the remote buffer is sent next.
+                    clientCallback.clientFinished(HttpPageBufferClient.this);
+                    scheduleRequest();
+                    return;
                 }
                 clientCallback.requestComplete(HttpPageBufferClient.this);
             }
@@ -560,15 +582,19 @@ public final class HttpPageBufferClient
                 }
 
                 backoff.success();
+                boolean notifyFinished;
                 synchronized (HttpPageBufferClient.this) {
                     closed = true;
                     if (future == resultFuture) {
                         future = null;
                     }
                     lastUpdate = Instant.now();
+                    notifyFinished = !finishReported;
                 }
                 requestsCompleted.incrementAndGet();
-                clientCallback.clientFinished(HttpPageBufferClient.this);
+                if (notifyFinished) {
+                    clientCallback.clientFinished(HttpPageBufferClient.this);
+                }
             }
 
             @Override
@@ -613,11 +639,19 @@ public final class HttpPageBufferClient
             clientCallback.clientFailed(HttpPageBufferClient.this, t);
         }
 
+        boolean retryDelete;
         synchronized (HttpPageBufferClient.this) {
             if (future == expectedFuture) {
                 future = null;
             }
             lastUpdate = Instant.now();
+            // the consumer no longer schedules this client after its finish was reported,
+            // so retry destroying the remote buffer here
+            retryDelete = finishReported && !(t instanceof TrinoException);
+        }
+        if (retryDelete) {
+            scheduleRequest();
+            return;
         }
         clientCallback.requestComplete(HttpPageBufferClient.this);
     }

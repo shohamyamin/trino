@@ -248,7 +248,9 @@ public class MockExchangeRequestProcessor
             // update sequence id
             long nextToken = token.get() + responsePages.size();
 
-            BufferResult bufferResult = new BufferResult(TASK_INSTANCE_ID, token.get(), nextToken, false, responsePages);
+            // like the real buffer, report completion together with the last pages
+            boolean bufferComplete = completed.get() && serializedPages.isEmpty();
+            BufferResult bufferResult = new BufferResult(TASK_INSTANCE_ID, token.get(), nextToken, bufferComplete, responsePages);
             token.set(nextToken);
 
             return bufferResult;

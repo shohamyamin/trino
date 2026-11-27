@@ -88,6 +88,11 @@ public final class BufferTestUtils
                 builder.build());
     }
 
+    static BufferResult withBufferComplete(BufferResult result)
+    {
+        return new BufferResult(result.taskInstanceId(), result.token(), result.nextToken(), true, result.serializedPages());
+    }
+
     public static Page createPage(int i)
     {
         return new Page(BlockAssertions.createLongsBlock(i));

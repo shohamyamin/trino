@@ -189,21 +189,60 @@ public class TestHttpPageBufferClient
         client.scheduleRequest();
         requestComplete.await(10, SECONDS);
 
-        // get the buffer complete signal
-        assertThat(callback.getPages()).isEmpty();
-        assertThat(callback.getCompletedRequests()).isEqualTo(1);
-
-        // schedule the delete call to the buffer
-        callback.resetStats();
-        client.scheduleRequest();
-        requestComplete.await(10, SECONDS);
-        assertThat(callback.getFinishedBuffers()).isEqualTo(1);
-
+        // the buffer complete signal finishes the client
         assertThat(callback.getPages()).isEmpty();
         assertThat(callback.getCompletedRequests()).isEqualTo(0);
+        assertThat(callback.getFinishedBuffers()).isEqualTo(1);
         assertThat(callback.getFailedBuffers()).isEqualTo(0);
 
+        // the delete call to the buffer is sent without waiting for the consumer
+        waitForClosed(client);
+        assertThat(callback.getFinishedBuffers()).isEqualTo(1);
         assertStatus(client, location, "closed", 3, 5, 5, 0, "not scheduled");
+    }
+
+    @Test
+    public void testBufferCompleteWithPages()
+            throws Exception
+    {
+        Page expectedPage = new Page(100);
+
+        DataSize expectedMaxSize = DataSize.of(11, MEGABYTE);
+        MockExchangeRequestProcessor processor = new MockExchangeRequestProcessor(expectedMaxSize);
+
+        CyclicBarrier requestComplete = new CyclicBarrier(2);
+        TestingClientCallback callback = new TestingClientCallback(requestComplete);
+
+        URI location = URI.create("http://localhost:8080");
+        HttpPageBufferClient client = new HttpPageBufferClient(
+                "localhost",
+                new TestingHttpClient(processor, scheduler),
+                DataIntegrityVerification.ABORT,
+                expectedMaxSize,
+                MAX_RESPONSE_CONTENT_LENGTH,
+                new Duration(1, MINUTES),
+                true,
+                TASK_ID,
+                location,
+                "node-instance",
+                callback,
+                scheduler,
+                pageBufferClientCallbackExecutor);
+
+        // the last pages are returned together with the buffer complete signal
+        processor.addPage(location, expectedPage);
+        processor.addPage(location, expectedPage);
+        processor.setComplete(location);
+        client.scheduleRequest();
+        requestComplete.await(10, SECONDS);
+
+        assertThat(callback.getPages()).hasSize(2);
+        assertThat(callback.getCompletedRequests()).isEqualTo(0);
+        assertThat(callback.getFinishedBuffers()).isEqualTo(1);
+        assertThat(callback.getFailedBuffers()).isEqualTo(0);
+
+        waitForClosed(client);
+        assertStatus(client, location, "closed", 2, 2, 2, 0, "not scheduled");
     }
 
     @Test
@@ -602,25 +641,18 @@ public class TestHttpPageBufferClient
                 scheduler,
                 pageBufferClientCallbackExecutor);
 
+        // the first two delete requests fail, and the client retries them on its own
+        processor.setServiceUnavailableDeletes(2);
         delegate.setComplete(location);
         client.scheduleRequest();
         requestComplete.await(10, SECONDS);
-        assertThat(callback.getCompletedRequests()).isEqualTo(1);
+        assertThat(callback.getCompletedRequests()).isEqualTo(0);
+        assertThat(callback.getFinishedBuffers()).isEqualTo(1);
 
-        processor.setServiceUnavailable(true);
-        callback.resetStats();
-        client.scheduleRequest();
-        requestComplete.await(10, SECONDS);
-        assertThat(callback.getFinishedBuffers()).isEqualTo(0);
-        assertThat(callback.getFailedBuffers()).isEqualTo(0);
-
-        processor.setServiceUnavailable(false);
-        callback.resetStats();
-        client.scheduleRequest();
-        requestComplete.await(10, SECONDS);
+        waitForClosed(client);
         assertThat(callback.getFinishedBuffers()).isEqualTo(1);
         assertThat(callback.getFailedBuffers()).isEqualTo(0);
-        assertStatus(client, location, "closed", 0, 3, 3, 1, "not scheduled");
+        assertStatus(client, location, "closed", 0, 4, 4, 2, "not scheduled");
     }
 
     @Test
@@ -785,6 +817,16 @@ public class TestHttpPageBufferClient
         assertThat(callback.getFinishedBuffers()).isEqualTo(0);
         assertThat(callback.getFailedBuffers()).isEqualTo(1);
         assertThat(callback.getFailure()).isEqualTo(expectedException);
+    }
+
+    private static void waitForClosed(HttpPageBufferClient client)
+            throws InterruptedException
+    {
+        long deadline = System.nanoTime() + SECONDS.toNanos(10);
+        while (!client.getStatus().getState().equals("closed") || client.isRunning()) {
+            assertThat(System.nanoTime()).isLessThan(deadline);
+            Thread.sleep(10);
+        }
     }
 
     private static void assertStatus(
@@ -962,6 +1004,7 @@ public class TestHttpPageBufferClient
     {
         private final TestingHttpClient.Processor delegate;
         private final AtomicBoolean serviceUnavailable = new AtomicBoolean();
+        private final AtomicInteger serviceUnavailableDeletes = new AtomicInteger();
 
         private ServiceUnavailableProcessor(TestingHttpClient.Processor delegate)
         {
@@ -973,11 +1016,16 @@ public class TestHttpPageBufferClient
             this.serviceUnavailable.set(serviceUnavailable);
         }
 
+        private void setServiceUnavailableDeletes(int count)
+        {
+            this.serviceUnavailableDeletes.set(count);
+        }
+
         @Override
         public Response handle(Request request)
                 throws Exception
         {
-            if (serviceUnavailable.get()) {
+            if (serviceUnavailable.get() || (request.getMethod().equals("DELETE") && serviceUnavailableDeletes.getAndDecrement() > 0)) {
                 return new TestingResponse(SERVICE_UNAVAILABLE, ImmutableListMultimap.of(CONTENT_TYPE, "text/plain"), "Trino server is still initializing".getBytes(UTF_8));
             }
             return delegate.handle(request);

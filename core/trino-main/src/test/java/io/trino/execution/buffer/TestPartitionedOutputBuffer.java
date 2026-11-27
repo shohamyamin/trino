@@ -56,6 +56,7 @@ import static io.trino.execution.buffer.BufferTestUtils.getBufferResult;
 import static io.trino.execution.buffer.BufferTestUtils.getFuture;
 import static io.trino.execution.buffer.BufferTestUtils.serializePage;
 import static io.trino.execution.buffer.BufferTestUtils.sizeOfPages;
+import static io.trino.execution.buffer.BufferTestUtils.withBufferComplete;
 import static io.trino.execution.buffer.PipelinedOutputBuffers.BufferType.PARTITIONED;
 import static io.trino.memory.context.AggregatedMemoryContext.newSimpleAggregatedMemoryContext;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -215,9 +216,9 @@ public class TestPartitionedOutputBuffer
         assertQueueState(buffer, FIRST, 11, 5);
         assertThat(buffer.getState()).isEqualTo(FLUSHING);
 
-        // remove all remaining pages from first queue, should not be finished
+        // remove all remaining pages from first queue, buffer is complete
         BufferResult x = getBufferResult(buffer, FIRST, 6, sizeOfPages(30), NO_WAIT);
-        assertBufferResultEquals(TYPES, x, bufferResult(
+        assertBufferResultEquals(TYPES, x, withBufferComplete(bufferResult(
                 6,
                 createPage(6),
                 createPage(7),
@@ -228,7 +229,7 @@ public class TestPartitionedOutputBuffer
                 createPage(12),
                 createPage(13),
                 createPage(14),
-                createPage(15)));
+                createPage(15))));
         assertQueueState(buffer, FIRST, 10, 6);
         // acknowledge all pages from the first partition, should transition to finished state
         assertBufferResultEquals(TYPES, getBufferResult(buffer, FIRST, 16, sizeOfPages(10), NO_WAIT), emptyResults(TASK_INSTANCE_ID, 16, true));
@@ -583,7 +584,7 @@ public class TestPartitionedOutputBuffer
         assertBufferResultEquals(
                 TYPES,
                 getBufferResult(buffer, FIRST, 1, sizeOfPages(100), NO_WAIT),
-                bufferResult(1, createPage(1), createPage(2), createPage(3), createPage(4), createPage(5), createPage(6)));
+                withBufferComplete(bufferResult(1, createPage(1), createPage(2), createPage(3), createPage(4), createPage(5), createPage(6))));
         assertBufferResultEquals(TYPES, getBufferResult(buffer, FIRST, 7, sizeOfPages(100), NO_WAIT), emptyResults(TASK_INSTANCE_ID, 7, true));
 
         buffer.destroy(FIRST);
@@ -756,8 +757,8 @@ public class TestPartitionedOutputBuffer
 
         buffer.setNoMorePages();
 
-        // get and acknowledge 5 pages
-        assertBufferResultEquals(TYPES, getBufferResult(buffer, FIRST, 0, sizeOfPages(5), MAX_WAIT), createBufferResult(TASK_INSTANCE_ID, 0, pages));
+        // get and acknowledge 5 pages, which are all remaining pages
+        assertBufferResultEquals(TYPES, getBufferResult(buffer, FIRST, 0, sizeOfPages(5), MAX_WAIT), withBufferComplete(createBufferResult(TASK_INSTANCE_ID, 0, pages)));
 
         // there are no more pages and no more buffers, but buffer is not finished because it didn't receive an acknowledgement yet
         assertThat(buffer.getState()).isEqualTo(FLUSHING);

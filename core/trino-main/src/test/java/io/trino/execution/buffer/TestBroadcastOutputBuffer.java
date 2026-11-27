@@ -63,6 +63,7 @@ import static io.trino.execution.buffer.BufferTestUtils.getBufferResult;
 import static io.trino.execution.buffer.BufferTestUtils.getFuture;
 import static io.trino.execution.buffer.BufferTestUtils.serializePage;
 import static io.trino.execution.buffer.BufferTestUtils.sizeOfPages;
+import static io.trino.execution.buffer.BufferTestUtils.withBufferComplete;
 import static io.trino.execution.buffer.PipelinedOutputBuffers.BROADCAST_PARTITION_ID;
 import static io.trino.execution.buffer.PipelinedOutputBuffers.BufferType.BROADCAST;
 import static io.trino.memory.context.AggregatedMemoryContext.newRootAggregatedMemoryContext;
@@ -226,9 +227,9 @@ public class TestBroadcastOutputBuffer
         assertQueueState(buffer, SECOND, 4, 10);
         assertThat(buffer.getState()).isEqualTo(FLUSHING);
 
-        // remove all remaining pages from first queue, should not be finished
+        // remove all remaining pages from first queue, buffer is complete
         BufferResult x = getBufferResult(buffer, FIRST, 6, sizeOfPages(10), NO_WAIT);
-        assertBufferResultEquals(TYPES, x, bufferResult(
+        assertBufferResultEquals(TYPES, x, withBufferComplete(bufferResult(
                 6,
                 createPage(6),
                 createPage(7),
@@ -237,7 +238,7 @@ public class TestBroadcastOutputBuffer
                 createPage(10),
                 createPage(11),
                 createPage(12),
-                createPage(13)));
+                createPage(13))));
         assertQueueState(buffer, FIRST, 8, 6);
         assertBufferResultEquals(TYPES, getBufferResult(buffer, FIRST, 14, sizeOfPages(10), NO_WAIT), emptyResults(TASK_INSTANCE_ID, 14, true));
 
@@ -248,12 +249,12 @@ public class TestBroadcastOutputBuffer
         assertThat(buffer.getState()).isEqualTo(FLUSHING);
 
         // remove all remaining pages from second queue, should be finished
-        assertBufferResultEquals(TYPES, getBufferResult(buffer, SECOND, 10, sizeOfPages(10), NO_WAIT), bufferResult(
+        assertBufferResultEquals(TYPES, getBufferResult(buffer, SECOND, 10, sizeOfPages(10), NO_WAIT), withBufferComplete(bufferResult(
                 10,
                 createPage(10),
                 createPage(11),
                 createPage(12),
-                createPage(13)));
+                createPage(13))));
         assertQueueState(buffer, SECOND, 4, 10);
         assertBufferResultEquals(TYPES, getBufferResult(buffer, SECOND, 14, sizeOfPages(10), NO_WAIT), emptyResults(TASK_INSTANCE_ID, 14, true));
         buffer.destroy(SECOND);
@@ -786,7 +787,7 @@ public class TestBroadcastOutputBuffer
         assertBufferResultEquals(
                 TYPES,
                 getBufferResult(buffer, FIRST, 1, sizeOfPages(100), NO_WAIT),
-                bufferResult(1, createPage(1), createPage(2), createPage(3), createPage(4), createPage(5), createPage(6)));
+                withBufferComplete(bufferResult(1, createPage(1), createPage(2), createPage(3), createPage(4), createPage(5), createPage(6))));
         assertBufferResultEquals(TYPES, getBufferResult(buffer, FIRST, 7, sizeOfPages(100), NO_WAIT), emptyResults(TASK_INSTANCE_ID, 7, true));
 
         buffer.destroy(FIRST);
@@ -1003,8 +1004,8 @@ public class TestBroadcastOutputBuffer
 
         buffer.setNoMorePages();
 
-        // get and acknowledge 5 pages
-        assertBufferResultEquals(TYPES, getBufferResult(buffer, FIRST, 0, sizeOfPages(5), MAX_WAIT), createBufferResult(TASK_INSTANCE_ID, 0, pages));
+        // get and acknowledge 5 pages, which are all remaining pages
+        assertBufferResultEquals(TYPES, getBufferResult(buffer, FIRST, 0, sizeOfPages(5), MAX_WAIT), withBufferComplete(createBufferResult(TASK_INSTANCE_ID, 0, pages)));
 
         // there are no more pages and no more buffers, but buffer is not finished because it didn't receive an acknowledgement yet
         assertThat(buffer.getState()).isEqualTo(FLUSHING);

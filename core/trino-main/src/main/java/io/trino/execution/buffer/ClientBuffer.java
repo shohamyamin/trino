@@ -368,7 +368,10 @@ class ClientBuffer
             }
             result.add(page.getSerializedPage());
         }
-        return new BufferResult(taskInstanceId, sequenceId, sequenceId + result.size(), false, result);
+        // if no more pages will be added and this result contains all remaining pages,
+        // tell the client that the buffer is complete, which saves the client a request
+        boolean bufferComplete = noMorePages && result.size() == pages.size();
+        return new BufferResult(taskInstanceId, sequenceId, sequenceId + result.size(), bufferComplete, result);
     }
 
     /**
