@@ -191,6 +191,7 @@ import io.trino.sql.planner.iterative.rule.PushdownFilterIntoWindow;
 import io.trino.sql.planner.iterative.rule.PushdownLimitIntoRowNumber;
 import io.trino.sql.planner.iterative.rule.PushdownLimitIntoWindow;
 import io.trino.sql.planner.iterative.rule.RemoveAggregationInSemiJoin;
+import io.trino.sql.planner.iterative.rule.RemoveDependentGroupingKeys;
 import io.trino.sql.planner.iterative.rule.RemoveDuplicateConditions;
 import io.trino.sql.planner.iterative.rule.RemoveEmptyExceptBranches;
 import io.trino.sql.planner.iterative.rule.RemoveEmptyGlobalAggregation;
@@ -471,6 +472,7 @@ public class PlanOptimizers
                                         new RewriteSpatialPartitioningAggregation(plannerContext),
                                         new SimplifyCountOverConstant(plannerContext),
                                         new PreAggregateCaseAggregations(plannerContext),
+                                        new RemoveDependentGroupingKeys(plannerContext),
                                         new RemoveRedundantDistinctAggregation()))
                                 .build()),
                 // Union flattening must already be at fixpoint from InitialPlanCleanup before any
