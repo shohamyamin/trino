@@ -137,7 +137,7 @@ public class TestParquetReader
         assertThat(isRowSelectionBeneficial(8_192, 410, 16, 500, INT32, false, false, 4, 1)).isTrue();
         assertThat(isRowSelectionBeneficial(8_192, 411, 16, 500, INT32, false, false, 4, 1)).isFalse();
 
-        // Every value family uses the same locality requirement.
+        // Fixed-width and dictionary values require 300 skipped positions per selected run.
         assertThat(isRowSelectionBeneficial(8_192, 409, 25, 300, INT32, false, false, 4, 1)).isTrue();
         assertThat(isRowSelectionBeneficial(8_192, 409, 26, 300, INT32, false, false, 4, 1)).isFalse();
 
@@ -162,6 +162,12 @@ public class TestParquetReader
         assertThat(isRowSelectionBeneficial(8_192, 2_048, 16, 400, BINARY, false, false, 256, 50)).isTrue();
         assertThat(isRowSelectionBeneficial(8_192, 2_049, 16, 400, BINARY, false, false, 256, 50)).isFalse();
         assertThat(isRowSelectionBeneficial(8_192, 2_048, 16, 400, BINARY, false, true, 256, 50)).isTrue();
+
+        // Plain binary values require 64 skipped positions per selected run.
+        assertThat(isRowSelectionBeneficial(8_192, 127, 126, 65, BINARY, false, false, 64, 1)).isTrue();
+        assertThat(isRowSelectionBeneficial(8_192, 127, 127, 65, BINARY, false, false, 64, 1)).isFalse();
+        assertThat(isRowSelectionBeneficial(8_192, 127, 126, 65, BINARY, true, false, 64, 1)).isFalse();
+        assertThat(isRowSelectionBeneficial(8_192, 127, 126, 65, FIXED_LEN_BYTE_ARRAY, false, false, 16, 1)).isFalse();
 
         // Very wide values use row-level decoding only for small projections.
         assertThat(isRowSelectionBeneficial(8_192, 2_048, 16, 400, BINARY, false, false, 1_024, 4)).isTrue();

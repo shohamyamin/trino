@@ -125,6 +125,9 @@ public class ParquetReader
     private static final long VERY_WIDE_BINARY_BYTES = 1_024;
     private static final int MAX_VERY_WIDE_BINARY_PROJECTED_COLUMNS = 4;
     private static final int MIN_SKIPPED_POSITIONS_PER_RUN = 300;
+    // Skipping a non-dictionary binary value only reads its length, while decoding it copies the value bytes,
+    // which are copied again when the selected positions are extracted, so much shorter gaps pay for a run
+    private static final int MIN_SKIPPED_BINARY_POSITIONS_PER_RUN = 64;
     private static final long MIN_SKIPPED_PAGE_BYTES = 4 * 1024;
     private static final int MAX_PAGE_AWARE_SELECTED_PERCENTAGE = 75;
     private static final int MAX_RETAINED_TO_LOGICAL_SIZE_RATIO = 2;
@@ -644,20 +647,21 @@ public class ParquetReader
             return analysis.maxSkippedPositionCount;
         }
 
-        public boolean hasRowSelectionLocality()
+        public boolean hasRowSelectionLocality(int minSkippedPositionsPerRun)
         {
             if (analysis.analyzed) {
                 return meetsRowSelectionLocality(
                         originalPositionCount - positionCount,
                         analysis.selectedRunCount,
-                        analysis.maxSkippedPositionCount);
+                        analysis.maxSkippedPositionCount,
+                        minSkippedPositionsPerRun);
             }
 
             checkFromIndexSize(positionsOffset, positionCount, positions.length);
             int skippedPositionCount = originalPositionCount - positionCount;
 
             // Each disjoint window with excess span contains at least one distinct run break.
-            int maximumBeneficialRunCount = skippedPositionCount / MIN_SKIPPED_POSITIONS_PER_RUN;
+            int maximumBeneficialRunCount = skippedPositionCount / minSkippedPositionsPerRun;
             if (positionCount > 1 && maximumBeneficialRunCount < positionCount) {
                 int sampleStride = toIntExact((positionCount - 1L + maximumBeneficialRunCount) / (maximumBeneficialRunCount + 1));
                 int minimumSelectedRunCount = 1;
@@ -672,7 +676,7 @@ public class ParquetReader
 
             analyze();
             return analysis.strictlyAscending
-                    && meetsRowSelectionLocality(skippedPositionCount, analysis.selectedRunCount, analysis.maxSkippedPositionCount);
+                    && meetsRowSelectionLocality(skippedPositionCount, analysis.selectedRunCount, analysis.maxSkippedPositionCount, minSkippedPositionsPerRun);
         }
 
         public boolean mayHaveMinimumPotentialSkippedBytes(long estimatedUncompressedBytesPerValue, long minimumSkippedPageBytes)
@@ -870,7 +874,7 @@ public class ParquetReader
             return SelectedPositionsReadMode.FULL;
         }
 
-        if (!potentiallyPageBeneficial && !selectedPositions.hasRowSelectionLocality()) {
+        if (!potentiallyPageBeneficial && !selectedPositions.hasRowSelectionLocality(minSkippedPositionsPerRun(characteristics.primitiveType(), characteristics.dictionaryEncoded()))) {
             return SelectedPositionsReadMode.FULL;
         }
         if (!selectedPositions.strictlyAscending()) {
@@ -948,7 +952,7 @@ public class ParquetReader
 
         int skippedPositionCount = batchSize - selectedPositionCount;
         // A single large gap cannot amortize the seek/read overhead of the remaining runs.
-        if (!meetsRowSelectionLocality(skippedPositionCount, selectedRunCount, maxSkippedPositionCount)) {
+        if (!meetsRowSelectionLocality(skippedPositionCount, selectedRunCount, maxSkippedPositionCount, minSkippedPositionsPerRun(primitiveType, dictionaryEncoded))) {
             return false;
         }
         // The generic seek/read path regresses packed Boolean values without a selection-aware decoder.
@@ -979,15 +983,20 @@ public class ParquetReader
         return (long) skippedPositionCount >= (long) selectedRunCount * minimumSkippedPositionsPerRun;
     }
 
-    private static boolean meetsRowSelectionLocality(int skippedPositionCount, int selectedRunCount, int maxSkippedPositionCount)
+    private static int minSkippedPositionsPerRun(PrimitiveTypeName primitiveType, boolean dictionaryEncoded)
     {
-        if (!hasMinimumSkippedPositionsPerRun(skippedPositionCount, selectedRunCount, MIN_SKIPPED_POSITIONS_PER_RUN)) {
+        return primitiveType == BINARY && !dictionaryEncoded ? MIN_SKIPPED_BINARY_POSITIONS_PER_RUN : MIN_SKIPPED_POSITIONS_PER_RUN;
+    }
+
+    private static boolean meetsRowSelectionLocality(int skippedPositionCount, int selectedRunCount, int maxSkippedPositionCount, int minSkippedPositionsPerRun)
+    {
+        if (!hasMinimumSkippedPositionsPerRun(skippedPositionCount, selectedRunCount, minSkippedPositionsPerRun)) {
             return false;
         }
         return selectedRunCount <= 1 || hasMinimumSkippedPositionsPerRun(
                 skippedPositionCount - maxSkippedPositionCount,
                 selectedRunCount - 1,
-                MIN_SKIPPED_POSITIONS_PER_RUN);
+                minSkippedPositionsPerRun);
     }
 
     private static boolean hasMinimumPotentialSkippedBytes(int skippedPositionCount, long estimatedUncompressedBytesPerValue, long minimumSkippedPageBytes)
