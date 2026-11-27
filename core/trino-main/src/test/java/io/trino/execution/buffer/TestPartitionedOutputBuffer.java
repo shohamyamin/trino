@@ -239,6 +239,43 @@ public class TestPartitionedOutputBuffer
 
     // TODO: remove this after PR is landed: https://github.com/prestodb/presto/pull/7987
     @Test
+    public void testPartitionReadByMultipleConsumers()
+    {
+        // both buffers read partition 0, e.g. two consumers of a shared fragment
+        PartitionedOutputBuffer buffer = createPartitionedBuffer(
+                PipelinedOutputBuffers.createInitial(PARTITIONED)
+                        .withBuffer(FIRST, 0)
+                        .withBuffer(SECOND, 0)
+                        .withNoMoreBufferIds()
+                        .withNoBlockOnFull(),
+                sizeOfPages(2));
+
+        // the writer is never blocked, as one consumer may wait for the other
+        for (int i = 0; i < 5; i++) {
+            addPage(buffer, createPage(i));
+        }
+        assertQueueState(buffer, FIRST, 5, 0);
+        assertQueueState(buffer, SECOND, 5, 0);
+
+        assertBufferResultEquals(TYPES, getBufferResult(buffer, FIRST, 0, sizeOfPages(10), NO_WAIT), bufferResult(0, createPage(0), createPage(1), createPage(2), createPage(3), createPage(4)));
+        buffer.acknowledge(FIRST, 5);
+        assertQueueState(buffer, FIRST, 0, 5);
+        assertQueueState(buffer, SECOND, 5, 0);
+        // pages are retained until all consumers acknowledged them
+        assertThat(buffer.getMemoryManager().getBufferedBytes()).isPositive();
+
+        assertBufferResultEquals(TYPES, getBufferResult(buffer, SECOND, 0, sizeOfPages(10), NO_WAIT), bufferResult(0, createPage(0), createPage(1), createPage(2), createPage(3), createPage(4)));
+        buffer.acknowledge(SECOND, 5);
+        assertThat(buffer.getMemoryManager().getBufferedBytes()).isZero();
+
+        buffer.setNoMorePages();
+        buffer.destroy(FIRST);
+        assertThat(buffer.getState()).isNotEqualTo(FINISHED);
+        buffer.destroy(SECOND);
+        assertFinished(buffer);
+    }
+
+    @Test
     public void testAcknowledge()
     {
         int partitionId = 0;

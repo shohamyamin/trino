@@ -57,4 +57,24 @@ public class TestBroadcastPipelinedOutputBufferManager
         hashOutputBufferManager.noMoreBuffers();
         assertThat(hashOutputBufferManager.getOutputBuffers()).isEqualTo(expectedOutputBuffers);
     }
+
+    @Test
+    public void testMultipleConsumers()
+    {
+        BroadcastPipelinedOutputBufferManager outputBufferManager = new BroadcastPipelinedOutputBufferManager(2);
+        assertThat(outputBufferManager.getOutputBuffers().isNoBlockOnFull()).isTrue();
+
+        outputBufferManager.addOutputBuffer(new OutputBufferId(0));
+        outputBufferManager.addOutputBuffer(new OutputBufferId(1));
+        // the first consumer is done adding buffers
+        outputBufferManager.noMoreBuffers();
+        assertThat(outputBufferManager.getOutputBuffers().isNoMoreBufferIds()).isFalse();
+
+        // the second consumer still adds buffers
+        outputBufferManager.addOutputBuffer(new OutputBufferId(3));
+        outputBufferManager.noMoreBuffers();
+        PipelinedOutputBuffers outputBuffers = outputBufferManager.getOutputBuffers();
+        assertThat(outputBuffers.isNoMoreBufferIds()).isTrue();
+        assertThat(outputBuffers.getBuffers().keySet()).containsExactlyInAnyOrder(new OutputBufferId(0), new OutputBufferId(1), new OutputBufferId(3));
+    }
 }

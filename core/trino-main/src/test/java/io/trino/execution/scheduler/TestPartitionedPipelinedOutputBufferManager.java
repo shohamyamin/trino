@@ -13,6 +13,7 @@
  */
 package io.trino.execution.scheduler;
 
+import com.google.common.collect.ImmutableMap;
 import io.trino.execution.buffer.PipelinedOutputBuffers;
 import io.trino.execution.buffer.PipelinedOutputBuffers.OutputBufferId;
 import org.junit.jupiter.api.Test;
@@ -49,6 +50,32 @@ public class TestPartitionedPipelinedOutputBufferManager
         // and output buffers should not change
         hashOutputBufferManager.noMoreBuffers();
         assertOutputBuffers(hashOutputBufferManager.getOutputBuffers());
+    }
+
+    @Test
+    public void testMultipleConsumers()
+    {
+        PartitionedPipelinedOutputBufferManager outputBufferManager = new PartitionedPipelinedOutputBufferManager(FIXED_HASH_DISTRIBUTION, 3, 2);
+
+        PipelinedOutputBuffers outputBuffers = outputBufferManager.getOutputBuffers();
+        assertThat(outputBuffers.isNoMoreBufferIds()).isTrue();
+        assertThat(outputBuffers.isNoBlockOnFull()).isTrue();
+        // consumer c reads partition p from buffer p * 2 + c
+        assertThat(outputBuffers.getBuffers()).isEqualTo(ImmutableMap.of(
+                new OutputBufferId(0), 0,
+                new OutputBufferId(1), 0,
+                new OutputBufferId(2), 1,
+                new OutputBufferId(3), 1,
+                new OutputBufferId(4), 2,
+                new OutputBufferId(5), 2));
+
+        outputBufferManager.addOutputBuffer(new OutputBufferId(5));
+        assertThatThrownBy(() -> outputBufferManager.addOutputBuffer(new OutputBufferId(6)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Unexpected new output buffer 6");
+
+        // a single consumer can block the producer
+        assertThat(new PartitionedPipelinedOutputBufferManager(FIXED_HASH_DISTRIBUTION, 3).getOutputBuffers().isNoBlockOnFull()).isFalse();
     }
 
     private static void assertOutputBuffers(PipelinedOutputBuffers outputBuffers)

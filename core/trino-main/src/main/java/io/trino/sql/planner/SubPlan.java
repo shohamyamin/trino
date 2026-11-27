@@ -19,10 +19,14 @@ import com.google.errorprone.annotations.Immutable;
 import io.trino.sql.planner.plan.PlanFragmentId;
 import io.trino.sql.planner.plan.RemoteSourceNode;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableMultiset.toImmutableMultiset;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static java.util.Objects.requireNonNull;
 
 @Immutable
@@ -55,29 +59,38 @@ public class SubPlan
      */
     public List<PlanFragment> getAllFragments()
     {
-        ImmutableList.Builder<PlanFragment> fragments = ImmutableList.builder();
+        // a fragment shared by several consumers is listed once
+        Map<PlanFragmentId, PlanFragment> fragments = new LinkedHashMap<>();
+        collectFragments(fragments);
+        return ImmutableList.copyOf(fragments.values());
+    }
 
-        fragments.add(getFragment());
-        for (SubPlan child : getChildren()) {
-            fragments.addAll(child.getAllFragments());
+    private void collectFragments(Map<PlanFragmentId, PlanFragment> fragments)
+    {
+        if (fragments.putIfAbsent(fragment.getId(), fragment) != null) {
+            return;
         }
-
-        return fragments.build();
+        for (SubPlan child : children) {
+            child.collectFragments(fragments);
+        }
     }
 
     public void sanityCheck()
     {
-        Multiset<PlanFragmentId> exchangeIds = fragment.getRemoteSourceNodes().stream()
+        // a fragment may be read by several remote sources of the same fragment
+        Set<PlanFragmentId> exchangeIds = fragment.getRemoteSourceNodes().stream()
                 .map(RemoteSourceNode::getSourceFragmentIds)
                 .flatMap(List::stream)
-                .collect(toImmutableMultiset());
+                .collect(toImmutableSet());
 
         Multiset<PlanFragmentId> childrenIds = children.stream()
                 .map(SubPlan::getFragment)
                 .map(PlanFragment::getId)
                 .collect(toImmutableMultiset());
 
-        checkState(exchangeIds.equals(childrenIds), "Subplan exchange ids don't match child fragment ids (%s vs %s)", exchangeIds, childrenIds);
+        checkState(childrenIds.elementSet().size() == childrenIds.size(), "Subplan has duplicate children: %s", childrenIds);
+
+        checkState(exchangeIds.equals(childrenIds.elementSet()), "Subplan exchange ids don't match child fragment ids (%s vs %s)", exchangeIds, childrenIds);
 
         for (SubPlan child : children) {
             child.sanityCheck();

@@ -43,10 +43,12 @@ public class PipelinedOutputBuffers
     private final BufferType type;
     private final Map<OutputBufferId, Integer> buffers;
     private final boolean noMoreBufferIds;
+    // set when consumers of the buffer may wait for each other, so the producer must not wait for them
+    private final boolean noBlockOnFull;
 
     public static PipelinedOutputBuffers createInitial(BufferType type)
     {
-        return new PipelinedOutputBuffers(0, type, ImmutableMap.of(), false);
+        return new PipelinedOutputBuffers(0, type, ImmutableMap.of(), false, false);
     }
 
     public static PipelinedOutputBuffers createInitial(PartitioningHandle partitioningHandle)
@@ -61,7 +63,7 @@ public class PipelinedOutputBuffers
         else {
             type = PARTITIONED;
         }
-        return new PipelinedOutputBuffers(0, type, ImmutableMap.of(), false);
+        return new PipelinedOutputBuffers(0, type, ImmutableMap.of(), false, false);
     }
 
     // Visible only for Jackson... Use the "with" methods instead
@@ -70,12 +72,14 @@ public class PipelinedOutputBuffers
             @JsonProperty("version") long version,
             @JsonProperty("type") BufferType type,
             @JsonProperty("buffers") Map<OutputBufferId, Integer> buffers,
-            @JsonProperty("noMoreBufferIds") boolean noMoreBufferIds)
+            @JsonProperty("noMoreBufferIds") boolean noMoreBufferIds,
+            @JsonProperty("noBlockOnFull") boolean noBlockOnFull)
     {
         super(version);
         this.type = requireNonNull(type, "type is null");
         this.buffers = ImmutableMap.copyOf(requireNonNull(buffers, "buffers is null"));
         this.noMoreBufferIds = noMoreBufferIds;
+        this.noBlockOnFull = noBlockOnFull;
     }
 
     @JsonProperty
@@ -96,6 +100,24 @@ public class PipelinedOutputBuffers
         return noMoreBufferIds;
     }
 
+    @JsonProperty
+    public boolean isNoBlockOnFull()
+    {
+        return noBlockOnFull;
+    }
+
+    /**
+     * Returns buffers that never block the producer when full. Used when the output is read by
+     * several consumers that may wait for each other, e.g. the build and the probe side of a join.
+     */
+    public PipelinedOutputBuffers withNoBlockOnFull()
+    {
+        if (noBlockOnFull) {
+            return this;
+        }
+        return new PipelinedOutputBuffers(getVersion() + 1, type, buffers, noMoreBufferIds, true);
+    }
+
     @Override
     public void checkValidTransition(OutputBuffers outputBuffers)
     {
@@ -104,6 +126,7 @@ public class PipelinedOutputBuffers
 
         PipelinedOutputBuffers newOutputBuffers = (PipelinedOutputBuffers) outputBuffers;
         checkState(type == newOutputBuffers.getType(), "newOutputBuffers has a different type %s, expected %s", newOutputBuffers.getType(), type);
+        checkState(!noBlockOnFull || newOutputBuffers.isNoBlockOnFull(), "newOutputBuffers must not block on full");
 
         if (noMoreBufferIds) {
             checkArgument(this.equals(newOutputBuffers), "Expected buffer to not change after no more buffers is set");
@@ -145,7 +168,8 @@ public class PipelinedOutputBuffers
                         .putAll(buffers)
                         .put(bufferId, partition)
                         .buildOrThrow(),
-                false);
+                false,
+                noBlockOnFull);
     }
 
     public PipelinedOutputBuffers withBuffers(Map<OutputBufferId, Integer> buffers)
@@ -177,7 +201,7 @@ public class PipelinedOutputBuffers
         // add the existing buffers
         newBuffers.putAll(this.buffers);
 
-        return new PipelinedOutputBuffers(getVersion() + 1, type, newBuffers, false);
+        return new PipelinedOutputBuffers(getVersion() + 1, type, newBuffers, false, noBlockOnFull);
     }
 
     public PipelinedOutputBuffers withNoMoreBufferIds()
@@ -186,7 +210,7 @@ public class PipelinedOutputBuffers
             return this;
         }
 
-        return new PipelinedOutputBuffers(getVersion() + 1, type, buffers, true);
+        return new PipelinedOutputBuffers(getVersion() + 1, type, buffers, true, noBlockOnFull);
     }
 
     private void checkHasBuffer(OutputBufferId bufferId, int partition)
@@ -244,13 +268,13 @@ public class PipelinedOutputBuffers
             return false;
         }
         PipelinedOutputBuffers that = (PipelinedOutputBuffers) o;
-        return getVersion() == that.getVersion() && noMoreBufferIds == that.noMoreBufferIds && type == that.type && buffers.equals(that.buffers);
+        return getVersion() == that.getVersion() && noMoreBufferIds == that.noMoreBufferIds && noBlockOnFull == that.noBlockOnFull && type == that.type && buffers.equals(that.buffers);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(getVersion(), type, buffers, noMoreBufferIds);
+        return Objects.hash(getVersion(), type, buffers, noMoreBufferIds, noBlockOnFull);
     }
 
     @Override
@@ -261,6 +285,7 @@ public class PipelinedOutputBuffers
                 .add("type", type)
                 .add("buffers", buffers)
                 .add("noMoreBufferIds", noMoreBufferIds)
+                .add("noBlockOnFull", noBlockOnFull)
                 .toString();
     }
 }

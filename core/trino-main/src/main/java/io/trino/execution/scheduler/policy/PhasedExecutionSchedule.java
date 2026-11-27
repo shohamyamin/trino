@@ -15,6 +15,7 @@ package io.trino.execution.scheduler.policy;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Multiset;
 import com.google.common.collect.Ordering;
 import com.google.common.graph.Graph;
 import com.google.common.graph.GraphBuilder;
@@ -42,7 +43,7 @@ import io.trino.sql.planner.plan.SpatialJoinNode;
 
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -53,6 +54,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static com.google.common.collect.ImmutableMultiset.toImmutableMultiset;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.MoreCollectors.onlyElement;
 import static io.trino.execution.scheduler.StageExecution.State.FLUSHING;
@@ -311,13 +313,24 @@ public class PhasedExecutionSchedule
         private final QueryId queryId;
         private final Map<PlanFragmentId, PlanFragment> fragments;
         private final ImmutableSet.Builder<PlanFragmentId> nonLazyFragments = ImmutableSet.builder();
-        private final Set<PlanFragmentId> processedFragments = new HashSet<>();
+        private final Map<PlanFragmentId, FragmentSubGraph> processedFragments = new HashMap<>();
+        private final Set<PlanFragmentId> sharedFragments;
 
         public Visitor(QueryId queryId, Collection<PlanFragment> fragments)
         {
             this.queryId = queryId;
             this.fragments = fragments.stream()
                     .collect(toImmutableMap(PlanFragment::getId, identity()));
+            // fragments read by several remote sources, e.g. a shared common table expression
+            this.sharedFragments = fragments.stream()
+                    .map(PlanFragment::getRemoteSourceNodes)
+                    .flatMap(Collection::stream)
+                    .flatMap(remoteSource -> remoteSource.getSourceFragmentIds().stream())
+                    .collect(toImmutableMultiset())
+                    .entrySet().stream()
+                    .filter(entry -> entry.getCount() > 1)
+                    .map(Multiset.Entry::getElement)
+                    .collect(toImmutableSet());
         }
 
         public Set<PlanFragmentId> getNonLazyFragments()
@@ -349,8 +362,19 @@ public class PhasedExecutionSchedule
 
         public FragmentSubGraph processFragment(PlanFragmentId planFragmentId)
         {
-            verify(processedFragments.add(planFragmentId), "fragment %s was already processed", planFragmentId);
+            FragmentSubGraph processed = processedFragments.get(planFragmentId);
+            if (processed != null) {
+                verify(sharedFragments.contains(planFragmentId), "fragment %s was already processed", planFragmentId);
+                return processed;
+            }
             FragmentSubGraph subGraph = processFragment(fragments.get(planFragmentId));
+            if (sharedFragments.contains(planFragmentId)) {
+                // A shared fragment and its sources only wait for stages within the shared subtree, never for
+                // stages of its consumers, as the consumers can depend on each other (e.g. build and probe side
+                // of the same join).
+                subGraph = new FragmentSubGraph(subGraph.getUpstreamFragments(), ImmutableSet.of(), false);
+            }
+            processedFragments.put(planFragmentId, subGraph);
             sortedFragments.add(planFragmentId);
             return subGraph;
         }

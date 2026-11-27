@@ -25,13 +25,16 @@ import io.trino.memory.context.LocalMemoryContext;
 import io.trino.plugin.base.metrics.TDigestHistogram;
 import io.trino.plugin.base.util.Lazy;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.LongAdder;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.execution.buffer.BufferState.FLUSHING;
 import static io.trino.execution.buffer.BufferState.NO_MORE_BUFFERS;
 import static io.trino.execution.buffer.PagesSerdeUtil.getSerializedPagePositionCount;
@@ -47,7 +50,10 @@ public class PartitionedOutputBuffer
     private final OutputBufferMemoryManager memoryManager;
     private final PagesReleasedListener onPagesReleased;
 
+    // indexed by output buffer id
     private final List<ClientBuffer> partitions;
+    // indexed by partition, every page of a partition is delivered to all its client buffers
+    private final List<List<ClientBuffer>> partitionBuffers;
 
     private final LongAdder totalPagesAdded = new LongAdder();
     private final LongAdder totalRowsAdded = new LongAdder();
@@ -72,12 +78,29 @@ public class PartitionedOutputBuffer
                 requireNonNull(notificationExecutor, "notificationExecutor is null"));
         this.onPagesReleased = PagesReleasedListener.forOutputBufferMemoryManager(memoryManager);
 
-        ImmutableList.Builder<ClientBuffer> partitions = ImmutableList.builderWithExpectedSize(outputBuffers.getBuffers().keySet().size());
-        for (OutputBufferId bufferId : outputBuffers.getBuffers().keySet()) {
-            ClientBuffer partition = new ClientBuffer(taskInstanceId, bufferId, onPagesReleased);
-            partitions.add(partition);
+        int bufferCount = outputBuffers.getBuffers().size();
+        ClientBuffer[] buffers = new ClientBuffer[bufferCount];
+        int partitionCount = 0;
+        for (Map.Entry<OutputBufferId, Integer> entry : outputBuffers.getBuffers().entrySet()) {
+            int id = entry.getKey().id();
+            checkArgument(id < bufferCount, "Output buffer ids must be dense: %s", outputBuffers.getBuffers());
+            buffers[id] = new ClientBuffer(taskInstanceId, entry.getKey(), onPagesReleased);
+            partitionCount = Math.max(partitionCount, entry.getValue() + 1);
         }
-        this.partitions = partitions.build();
+        this.partitions = ImmutableList.copyOf(buffers);
+        List<ImmutableList.Builder<ClientBuffer>> partitionBuffers = new ArrayList<>();
+        for (int partition = 0; partition < partitionCount; partition++) {
+            partitionBuffers.add(ImmutableList.builder());
+        }
+        for (Map.Entry<OutputBufferId, Integer> entry : outputBuffers.getBuffers().entrySet()) {
+            partitionBuffers.get(entry.getValue()).add(buffers[entry.getKey().id()]);
+        }
+        this.partitionBuffers = partitionBuffers.stream()
+                .map(ImmutableList.Builder::build)
+                .collect(toImmutableList());
+        if (outputBuffers.isNoBlockOnFull()) {
+            memoryManager.setNoBlockOnFull();
+        }
 
         stateMachine.noMoreBuffers();
         checkFlushComplete();
@@ -172,7 +195,7 @@ public class PartitionedOutputBuffer
     @Override
     public void enqueue(List<Slice> pages)
     {
-        checkState(partitions.size() == 1, "Expected exactly one partition");
+        checkState(partitionBuffers.size() == 1, "Expected exactly one partition");
         enqueue(0, pages);
     }
 
@@ -206,8 +229,10 @@ public class PartitionedOutputBuffer
         // reserve memory
         memoryManager.updateMemoryUsage(bytesAdded);
 
-        // add pages to the buffer (this will increase the reference count by one)
-        partitions.get(partitionNumber).enqueuePages(serializedPageReferences);
+        // add pages to the buffers (this will increase the reference count by one for each buffer)
+        for (ClientBuffer buffer : partitionBuffers.get(partitionNumber)) {
+            buffer.enqueuePages(serializedPageReferences);
+        }
 
         // drop the initial reference
         dereferencePages(serializedPageReferences, onPagesReleased);

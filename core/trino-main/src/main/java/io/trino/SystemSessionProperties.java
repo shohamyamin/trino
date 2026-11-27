@@ -129,6 +129,7 @@ public final class SystemSessionProperties
     public static final String MARK_DISTINCT_STRATEGY = "mark_distinct_strategy";
     public static final String DISTINCT_AGGREGATIONS_STRATEGY = "distinct_aggregations_strategy";
     public static final String PREFER_PARTIAL_AGGREGATION = "prefer_partial_aggregation";
+    public static final String SHARE_COMMON_FRAGMENTS = "share_common_fragments";
     public static final String OPTIMIZE_TOP_N_RANKING = "optimize_top_n_ranking";
     public static final String MAX_GROUPING_SETS = "max_grouping_sets";
     public static final String ENABLE_STATS_CALCULATOR = "enable_stats_calculator";
@@ -617,6 +618,11 @@ public final class SystemSessionProperties
                         PREFER_PARTIAL_AGGREGATION,
                         "Prefer splitting aggregations into partial and final stages",
                         optimizerConfig.isPreferPartialAggregation(),
+                        false),
+                booleanProperty(
+                        SHARE_COMMON_FRAGMENTS,
+                        "Compute identical plan fragments, e.g. copies of a common table expression, once and share the output with all consumers",
+                        optimizerConfig.isShareCommonFragments(),
                         false),
                 booleanProperty(
                         OPTIMIZE_TOP_N_RANKING,
@@ -1516,6 +1522,11 @@ public final class SystemSessionProperties
     public static boolean preferPartialAggregation(Session session)
     {
         return session.getSystemProperty(PREFER_PARTIAL_AGGREGATION, Boolean.class);
+    }
+
+    public static boolean isShareCommonFragments(Session session)
+    {
+        return session.getSystemProperty(SHARE_COMMON_FRAGMENTS, Boolean.class);
     }
 
     public static boolean isOptimizeTopNRanking(Session session)

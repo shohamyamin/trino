@@ -74,6 +74,7 @@ public class OptimizerConfig
     private MarkDistinctStrategy markDistinctStrategy;
     private DistinctAggregationsStrategy distinctAggregationsStrategy;
     private boolean preferPartialAggregation = true;
+    private boolean shareCommonFragments = true;
     private boolean pushAggregationThroughOuterJoin = true;
     private boolean enableIntermediateAggregations;
     private boolean pushPartialAggregationThroughJoin = true;
@@ -518,6 +519,19 @@ public class OptimizerConfig
     public OptimizerConfig setPreferPartialAggregation(boolean value)
     {
         this.preferPartialAggregation = value;
+        return this;
+    }
+
+    public boolean isShareCommonFragments()
+    {
+        return shareCommonFragments;
+    }
+
+    @Config("optimizer.share-common-fragments")
+    @ConfigDescription("Compute identical plan fragments, e.g. copies of a common table expression, once and share the output with all consumers")
+    public OptimizerConfig setShareCommonFragments(boolean shareCommonFragments)
+    {
+        this.shareCommonFragments = shareCommonFragments;
         return this;
     }
 

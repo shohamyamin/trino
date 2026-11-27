@@ -18,6 +18,7 @@ import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.trino.execution.buffer.PipelinedOutputBuffers;
 import io.trino.execution.buffer.PipelinedOutputBuffers.OutputBufferId;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.execution.buffer.PipelinedOutputBuffers.BROADCAST_PARTITION_ID;
 import static io.trino.execution.buffer.PipelinedOutputBuffers.BufferType.BROADCAST;
 
@@ -26,7 +27,29 @@ class BroadcastPipelinedOutputBufferManager
         implements PipelinedOutputBufferManager
 {
     @GuardedBy("this")
-    private PipelinedOutputBuffers outputBuffers = PipelinedOutputBuffers.createInitial(BROADCAST);
+    private PipelinedOutputBuffers outputBuffers;
+    @GuardedBy("this")
+    private int pendingConsumers;
+
+    BroadcastPipelinedOutputBufferManager()
+    {
+        this(1);
+    }
+
+    /**
+     * @param consumerCount number of consumers reading the output, each of them signals no more buffers
+     */
+    BroadcastPipelinedOutputBufferManager(int consumerCount)
+    {
+        checkArgument(consumerCount >= 1, "consumerCount must be at least 1");
+        PipelinedOutputBuffers outputBuffers = PipelinedOutputBuffers.createInitial(BROADCAST);
+        if (consumerCount > 1) {
+            // consumers may wait for each other, e.g. build and probe side of a join
+            outputBuffers = outputBuffers.withNoBlockOnFull();
+        }
+        this.outputBuffers = outputBuffers;
+        this.pendingConsumers = consumerCount;
+    }
 
     @Override
     public synchronized void addOutputBuffer(OutputBufferId newBuffer)
@@ -49,7 +72,10 @@ class BroadcastPipelinedOutputBufferManager
     @Override
     public synchronized void noMoreBuffers()
     {
-        if (!outputBuffers.isNoMoreBufferIds()) {
+        if (pendingConsumers > 0) {
+            pendingConsumers--;
+        }
+        if (pendingConsumers == 0 && !outputBuffers.isNoMoreBufferIds()) {
             outputBuffers = outputBuffers.withNoMoreBufferIds();
         }
     }

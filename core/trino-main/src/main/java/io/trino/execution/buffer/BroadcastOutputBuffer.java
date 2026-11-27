@@ -182,6 +182,9 @@ public class BroadcastOutputBuffer
             // verify this is valid state change
             outputBuffers.checkValidTransition(newOutputBuffers);
             outputBuffers = (PipelinedOutputBuffers) newOutputBuffers;
+            if (outputBuffers.isNoBlockOnFull()) {
+                memoryManager.setNoBlockOnFull();
+            }
 
             // add the new buffers
             for (Entry<OutputBufferId, Integer> entry : outputBuffers.getBuffers().entrySet()) {

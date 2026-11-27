@@ -110,6 +110,30 @@ public class TestPhasedExecutionSchedule
     }
 
     @Test
+    public void testJoinOfSharedFragment()
+    {
+        // the same fragment is read by the build and the probe side of the join
+        PlanFragment sharedFragment = createTableScanPlanFragment("shared");
+        PlanFragment joinFragment = createJoinPlanFragment(INNER, PARTITIONED, "join", sharedFragment, sharedFragment);
+
+        TestingStageExecution sharedStage = new TestingStageExecution(sharedFragment);
+        TestingStageExecution joinStage = new TestingStageExecution(joinFragment);
+
+        PhasedExecutionSchedule schedule = PhasedExecutionSchedule.forStages(ImmutableSet.of(sharedStage, joinStage), dynamicFilterService);
+        assertThat(schedule.getSortedFragments()).containsExactly(sharedFragment.getId(), joinFragment.getId());
+
+        // the shared stage must not wait for itself
+        assertThat(schedule.getFragmentDependency().edges()).isEmpty();
+        assertThat(getSchedulingFragments(schedule)).containsExactlyInAnyOrder(sharedFragment.getId(), joinFragment.getId());
+
+        sharedStage.setState(FINISHED);
+        joinStage.setState(FINISHED);
+        schedule.schedule();
+        assertThat(getSchedulingFragments(schedule)).isEmpty();
+        assertThat(schedule.isFinished()).isTrue();
+    }
+
+    @Test
     public void testBroadcastSourceJoin()
     {
         PlanFragment buildFragment = createTableScanPlanFragment("build");

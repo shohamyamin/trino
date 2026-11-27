@@ -15,9 +15,11 @@ package io.trino.execution.scheduler;
 
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableListMultimap;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Multimap;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import io.airlift.log.Logger;
@@ -58,8 +60,9 @@ import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 import java.util.stream.Stream;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
@@ -117,7 +120,8 @@ public class PipelinedStageExecution
     private final InternalNodeManager nodeManager;
     private final int[] bucketToPartition;
     private final OptionalInt skewedBucketCount;
-    private final Map<PlanFragmentId, RemoteSourceNode> exchangeSources;
+    private final ListMultimap<PlanFragmentId, RemoteSourceNode> exchangeSources;
+    private final ExchangeConsumers exchangeConsumers;
     private final int attempt;
 
     private final Int2ObjectMap<RemoteTask> tasks = synchronize(new Int2ObjectOpenHashMap<>(), this);
@@ -146,8 +150,22 @@ public class PipelinedStageExecution
             OptionalInt skewedBucketCount,
             int attempt)
     {
+        return createPipelinedStageExecution(stage, outputBufferManagers, ExchangeConsumers.EMPTY, taskLifecycleListener, nodeManager, executor, bucketToPartition, skewedBucketCount, attempt);
+    }
+
+    public static PipelinedStageExecution createPipelinedStageExecution(
+            SqlStage stage,
+            Map<PlanFragmentId, PipelinedOutputBufferManager> outputBufferManagers,
+            ExchangeConsumers exchangeConsumers,
+            TaskLifecycleListener taskLifecycleListener,
+            InternalNodeManager nodeManager,
+            Executor executor,
+            int[] bucketToPartition,
+            OptionalInt skewedBucketCount,
+            int attempt)
+    {
         PipelinedStageStateMachine stateMachine = new PipelinedStageStateMachine(stage.getStageId(), executor);
-        ImmutableMap.Builder<PlanFragmentId, RemoteSourceNode> exchangeSources = ImmutableMap.builder();
+        ImmutableListMultimap.Builder<PlanFragmentId, RemoteSourceNode> exchangeSources = ImmutableListMultimap.builder();
         for (RemoteSourceNode remoteSourceNode : stage.getFragment().getRemoteSourceNodes()) {
             for (PlanFragmentId planFragmentId : remoteSourceNode.getSourceFragmentIds()) {
                 exchangeSources.put(planFragmentId, remoteSourceNode);
@@ -161,7 +179,8 @@ public class PipelinedStageExecution
                 nodeManager,
                 bucketToPartition,
                 skewedBucketCount,
-                exchangeSources.buildOrThrow(),
+                exchangeSources.build(),
+                exchangeConsumers,
                 attempt);
         execution.initialize();
         return execution;
@@ -175,7 +194,8 @@ public class PipelinedStageExecution
             InternalNodeManager nodeManager,
             int[] bucketToPartition,
             OptionalInt skewedBucketCount,
-            Map<PlanFragmentId, RemoteSourceNode> exchangeSources,
+            ListMultimap<PlanFragmentId, RemoteSourceNode> exchangeSources,
+            ExchangeConsumers exchangeConsumers,
             int attempt)
     {
         this.stateMachine = requireNonNull(stateMachine, "stateMachine is null");
@@ -185,16 +205,24 @@ public class PipelinedStageExecution
         this.nodeManager = requireNonNull(nodeManager, "nodeManager is null");
         this.bucketToPartition = requireNonNull(bucketToPartition, "bucketToPartition is null");
         this.skewedBucketCount = requireNonNull(skewedBucketCount, "skewedBucketCount is null");
-        this.exchangeSources = ImmutableMap.copyOf(requireNonNull(exchangeSources, "exchangeSources is null"));
+        this.exchangeSources = ImmutableListMultimap.copyOf(requireNonNull(exchangeSources, "exchangeSources is null"));
+        this.exchangeConsumers = requireNonNull(exchangeConsumers, "exchangeConsumers is null");
         this.attempt = attempt;
     }
 
     private void initialize()
     {
+        AtomicBoolean noMoreBuffers = new AtomicBoolean();
         stateMachine.addStateChangeListener(state -> {
             if (!state.canScheduleMoreTasks()) {
                 taskLifecycleListener.noMoreTasks(stage.getFragment().getId());
-                updateSourceTasksOutputBuffers(PipelinedOutputBufferManager::noMoreBuffers);
+                // a shared source fragment counts the consumers that signaled no more buffers, so signal only once
+                if (noMoreBuffers.compareAndSet(false, true)) {
+                    updateSourceTasksOutputBuffers((_, outputBufferManager) -> outputBufferManager.noMoreBuffers());
+                }
+                else {
+                    updateSourceTasksOutputBuffers((_, _) -> {});
+                }
             }
         });
     }
@@ -323,8 +351,9 @@ public class PipelinedStageExecution
         sourceTasks.forEach((sourceFragmentId, sourceTask) -> {
             TaskStatus status = sourceTask.getTaskStatus();
             if (status.state() != TaskState.FINISHED) {
-                PlanNodeId planNodeId = exchangeSources.get(sourceFragmentId).getId();
-                exchangeSplits.put(planNodeId, createExchangeSplit(sourceTask, task));
+                for (RemoteSourceNode remoteSource : exchangeSources.get(sourceFragmentId)) {
+                    exchangeSplits.put(remoteSource.getId(), createExchangeSplit(sourceTask, getOutputBufferId(sourceFragmentId, remoteSource, task)));
+                }
             }
         });
 
@@ -340,8 +369,7 @@ public class PipelinedStageExecution
         taskLifecycleListener.taskCreated(stage.getFragment().getId(), task);
 
         // update output buffers
-        OutputBufferId outputBufferId = new OutputBufferId(task.getTaskId().partitionId());
-        updateSourceTasksOutputBuffers(outputBufferManager -> outputBufferManager.addOutputBuffer(outputBufferId));
+        updateSourceTasksOutputBuffers((remoteSource, outputBufferManager) -> outputBufferManager.addOutputBuffer(getOutputBufferId(remoteSource.sourceFragmentId(), remoteSource.node(), task)));
 
         return Optional.of(task);
     }
@@ -475,45 +503,58 @@ public class PipelinedStageExecution
     {
         requireNonNull(fragmentId, "fragmentId is null");
 
-        RemoteSourceNode remoteSource = exchangeSources.get(fragmentId);
-        checkArgument(remoteSource != null, "Unknown remote source %s. Known sources are %s", fragmentId, exchangeSources.keySet());
+        List<RemoteSourceNode> remoteSources = exchangeSources.get(fragmentId);
+        checkArgument(!remoteSources.isEmpty(), "Unknown remote source %s. Known sources are %s", fragmentId, exchangeSources.keySet());
 
         sourceTasks.put(fragmentId, sourceTask);
 
         PipelinedOutputBufferManager outputBufferManager = outputBufferManagers.get(fragmentId);
         sourceTask.setOutputBuffers(outputBufferManager.getOutputBuffers());
 
-        for (RemoteTask destinationTask : getAllTasks()) {
-            destinationTask.addSplits(ImmutableMultimap.of(remoteSource.getId(), createExchangeSplit(sourceTask, destinationTask)));
+        for (RemoteSourceNode remoteSource : remoteSources) {
+            for (RemoteTask destinationTask : getAllTasks()) {
+                destinationTask.addSplits(ImmutableMultimap.of(remoteSource.getId(), createExchangeSplit(sourceTask, getOutputBufferId(fragmentId, remoteSource, destinationTask))));
+            }
         }
     }
 
     private synchronized void noMoreSourceTasks(PlanFragmentId fragmentId)
     {
-        RemoteSourceNode remoteSource = exchangeSources.get(fragmentId);
-        checkArgument(remoteSource != null, "Unknown remote source %s. Known sources are %s", fragmentId, exchangeSources.keySet());
+        List<RemoteSourceNode> remoteSources = exchangeSources.get(fragmentId);
+        checkArgument(!remoteSources.isEmpty(), "Unknown remote source %s. Known sources are %s", fragmentId, exchangeSources.keySet());
 
         completeSourceFragments.add(fragmentId);
 
-        // is the source now complete?
-        if (completeSourceFragments.containsAll(remoteSource.getSourceFragmentIds())) {
-            completeSources.add(remoteSource.getId());
-            for (RemoteTask task : getAllTasks()) {
-                task.noMoreSplits(remoteSource.getId());
+        for (RemoteSourceNode remoteSource : remoteSources) {
+            // is the source now complete?
+            if (completeSourceFragments.containsAll(remoteSource.getSourceFragmentIds())) {
+                completeSources.add(remoteSource.getId());
+                for (RemoteTask task : getAllTasks()) {
+                    task.noMoreSplits(remoteSource.getId());
+                }
             }
         }
     }
 
-    private synchronized void updateSourceTasksOutputBuffers(Consumer<PipelinedOutputBufferManager> updater)
+    private OutputBufferId getOutputBufferId(PlanFragmentId sourceFragmentId, RemoteSourceNode remoteSource, RemoteTask destinationTask)
+    {
+        return exchangeConsumers.getOutputBufferId(sourceFragmentId, remoteSource.getId(), destinationTask.getTaskId().partitionId());
+    }
+
+    private synchronized void updateSourceTasksOutputBuffers(BiConsumer<SourceConsumer, PipelinedOutputBufferManager> updater)
     {
         for (PlanFragmentId sourceFragment : exchangeSources.keySet()) {
             PipelinedOutputBufferManager outputBufferManager = outputBufferManagers.get(sourceFragment);
-            updater.accept(outputBufferManager);
+            for (RemoteSourceNode remoteSource : exchangeSources.get(sourceFragment)) {
+                updater.accept(new SourceConsumer(sourceFragment, remoteSource), outputBufferManager);
+            }
             for (RemoteTask sourceTask : sourceTasks.get(sourceFragment)) {
                 sourceTask.setOutputBuffers(outputBufferManager.getOutputBuffers());
             }
         }
     }
+
+    private record SourceConsumer(PlanFragmentId sourceFragmentId, RemoteSourceNode node) {}
 
     @Override
     public List<RemoteTask> getAllTasks()
@@ -580,11 +621,11 @@ public class PipelinedStageExecution
         return stateMachine.toString();
     }
 
-    private static Split createExchangeSplit(RemoteTask sourceTask, RemoteTask destinationTask)
+    private static Split createExchangeSplit(RemoteTask sourceTask, OutputBufferId outputBufferId)
     {
-        // Fetch the results from the buffer assigned to the task based on id
+        // Fetch the results from the buffer assigned to the destination task
         URI exchangeLocation = sourceTask.getTaskStatus().self();
-        URI splitLocation = uriBuilderFrom(exchangeLocation).appendPath("results").appendPath(String.valueOf(destinationTask.getTaskId().partitionId())).build();
+        URI splitLocation = uriBuilderFrom(exchangeLocation).appendPath("results").appendPath(String.valueOf(outputBufferId.id())).build();
         return new Split(REMOTE_CATALOG_HANDLE, new RemoteSplit(new DirectExchangeInput(sourceTask.getTaskId(), splitLocation.toString(), sourceTask.getNodeInstanceId())));
     }
 

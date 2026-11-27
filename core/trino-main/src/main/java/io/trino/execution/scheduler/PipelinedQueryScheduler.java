@@ -78,6 +78,7 @@ import io.trino.tracing.TrinoAttributes;
 
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -85,6 +86,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
@@ -886,10 +888,14 @@ public class PipelinedQueryScheduler
                     coordinatorStagesScheduler.getBucketToPartitionForStagesConsumedByCoordinator(),
                     stageManager,
                     partitioningCache);
+            ExchangeConsumers exchangeConsumers = ExchangeConsumers.create(stageManager.getStagesInTopologicalOrder().stream()
+                    .map(SqlStage::getFragment)
+                    .collect(toImmutableList()));
             Map<PlanFragmentId, PipelinedOutputBufferManager> outputBufferManagers = createOutputBufferManagers(
                     coordinatorStagesScheduler.getOutputBuffersForStagesConsumedByCoordinator(),
                     stageManager,
-                    bucketToPartitionMap);
+                    bucketToPartitionMap,
+                    exchangeConsumers);
 
             TaskLifecycleListener coordinatorTaskLifecycleListener = coordinatorStagesScheduler.getTaskLifecycleListener();
             if (retryPolicy != RetryPolicy.NONE) {
@@ -906,16 +912,20 @@ public class PipelinedQueryScheduler
             // Preserve topological ordering in stageExecutionsMap
             Map<StageId, StageExecution> stageExecutions = new LinkedHashMap<>();
             for (SqlStage stage : stageManager.getDistributedStagesInTopologicalOrder()) {
-                Optional<SqlStage> parentStage = stageManager.getParent(stage.getStageId());
+                Set<SqlStage> parentStages = stageManager.getParents(stage.getStageId());
                 TaskLifecycleListener taskLifecycleListener;
-                if (parentStage.isEmpty() || parentStage.get().getFragment().getPartitioning().isCoordinatorOnly()) {
+                if (parentStages.isEmpty() || parentStages.stream().anyMatch(parentStage -> parentStage.getFragment().getPartitioning().isCoordinatorOnly())) {
                     // output will be consumed by coordinator
+                    verify(parentStages.size() <= 1, "stage consumed by coordinator must have a single consumer: %s", stage.getStageId());
                     taskLifecycleListener = coordinatorTaskLifecycleListener;
                 }
                 else {
-                    StageId parentStageId = parentStage.get().getStageId();
-                    StageExecution parentStageExecution = requireNonNull(stageExecutions.get(parentStageId), () -> "execution is null for stage: " + parentStageId);
-                    taskLifecycleListener = parentStageExecution.getTaskLifecycleListener();
+                    List<TaskLifecycleListener> parentListeners = parentStages.stream()
+                            .map(SqlStage::getStageId)
+                            .map(parentStageId -> requireNonNull(stageExecutions.get(parentStageId), () -> "execution is null for stage: " + parentStageId))
+                            .map(StageExecution::getTaskLifecycleListener)
+                            .collect(toImmutableList());
+                    taskLifecycleListener = parentListeners.size() == 1 ? getOnlyElement(parentListeners) : new BroadcastTaskLifecycleListener(parentListeners);
                 }
 
                 PlanFragment fragment = stage.getFragment();
@@ -927,6 +937,7 @@ public class PipelinedQueryScheduler
                 StageExecution stageExecution = createPipelinedStageExecution(
                         stageManager.get(fragment.getId()),
                         outputBufferManagers,
+                        exchangeConsumers,
                         taskLifecycleListener,
                         nodeManager,
                         executor,
@@ -975,16 +986,22 @@ public class PipelinedQueryScheduler
                 StageManager stageManager,
                 Function<PartitioningKey, NodePartitionMap> partitioningCache)
         {
-            ImmutableMap.Builder<PlanFragmentId, BucketToPartition> result = ImmutableMap.builder();
-            result.putAll(bucketToPartitionForStagesConsumedByCoordinator);
+            Map<PlanFragmentId, BucketToPartition> result = new HashMap<>(bucketToPartitionForStagesConsumedByCoordinator);
             for (SqlStage stage : stageManager.getDistributedStagesInTopologicalOrder()) {
                 PlanFragment fragment = stage.getFragment();
                 BucketToPartition bucketToPartition = getBucketToPartition(fragment, session, partitioningCache);
                 for (SqlStage childStage : stageManager.getChildren(stage.getStageId())) {
-                    result.put(childStage.getFragment().getId(), bucketToPartition);
+                    BucketToPartition existing = result.putIfAbsent(childStage.getFragment().getId(), bucketToPartition);
+                    // all consumers of a shared partitioned output must read the same partitions
+                    checkState(
+                            existing == null ||
+                                    childStage.getFragment().getOutputPartitioningScheme().getPartitioning().getHandle().equals(FIXED_BROADCAST_DISTRIBUTION) ||
+                                    Arrays.equals(existing.bucketToPartition(), bucketToPartition.bucketToPartition()),
+                            "Consumers of fragment %s use different partitioning",
+                            childStage.getFragment().getId());
                 }
             }
-            return result.buildOrThrow();
+            return ImmutableMap.copyOf(result);
         }
 
         private static BucketToPartition getBucketToPartition(PlanFragment fragment, Session session, Function<PartitioningKey, NodePartitionMap> partitioningCache)
@@ -1007,30 +1024,36 @@ public class PipelinedQueryScheduler
         private static Map<PlanFragmentId, PipelinedOutputBufferManager> createOutputBufferManagers(
                 Map<PlanFragmentId, PipelinedOutputBufferManager> outputBuffersForStagesConsumedByCoordinator,
                 StageManager stageManager,
-                Map<PlanFragmentId, BucketToPartition> bucketToPartitionMap)
+                Map<PlanFragmentId, BucketToPartition> bucketToPartitionMap,
+                ExchangeConsumers exchangeConsumers)
         {
-            ImmutableMap.Builder<PlanFragmentId, PipelinedOutputBufferManager> result = ImmutableMap.builder();
-            result.putAll(outputBuffersForStagesConsumedByCoordinator);
+            Map<PlanFragmentId, PipelinedOutputBufferManager> result = new HashMap<>(outputBuffersForStagesConsumedByCoordinator);
             for (SqlStage parentStage : stageManager.getDistributedStagesInTopologicalOrder()) {
                 for (SqlStage childStage : stageManager.getChildren(parentStage.getStageId())) {
                     PlanFragmentId fragmentId = childStage.getFragment().getId();
+                    if (result.containsKey(fragmentId)) {
+                        // shared by several consumers
+                        continue;
+                    }
                     PartitioningHandle partitioningHandle = childStage.getFragment().getOutputPartitioningScheme().getPartitioning().getHandle();
+                    int consumerCount = exchangeConsumers.getConsumerCount(fragmentId);
 
                     PipelinedOutputBufferManager outputBufferManager;
                     if (partitioningHandle.equals(FIXED_BROADCAST_DISTRIBUTION)) {
-                        outputBufferManager = new BroadcastPipelinedOutputBufferManager();
+                        outputBufferManager = new BroadcastPipelinedOutputBufferManager(consumerCount);
                     }
                     else if (partitioningHandle.equals(SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION)) {
+                        checkState(consumerCount == 1, "Scaled writer output cannot be shared");
                         outputBufferManager = new ScaledPipelinedOutputBufferManager();
                     }
                     else {
                         int partitionCount = Ints.max(getRequiredBucketToPartition(bucketToPartitionMap, fragmentId).bucketToPartition()) + 1;
-                        outputBufferManager = new PartitionedPipelinedOutputBufferManager(partitioningHandle, partitionCount);
+                        outputBufferManager = new PartitionedPipelinedOutputBufferManager(partitioningHandle, partitionCount, consumerCount);
                     }
                     result.put(fragmentId, outputBufferManager);
                 }
             }
-            return result.buildOrThrow();
+            return ImmutableMap.copyOf(result);
         }
 
         private static BucketToPartition getRequiredBucketToPartition(Map<PlanFragmentId, BucketToPartition> bucketToPartitionMap, PlanFragmentId fragmentId)
@@ -1236,16 +1259,20 @@ public class PipelinedQueryScheduler
         private void initialize()
         {
             for (StageExecution stageExecution : stageExecutions.values()) {
-                List<StageExecution> childStageExecutions = stageManager.getChildren(stageExecution.getStageId()).stream()
-                        .map(stage -> requireNonNull(stageExecutions.get(stage.getStageId()), () -> "stage execution not found for stage: " + stage))
+                List<StageExecution> parentStageExecutions = stageManager.getParents(stageExecution.getStageId()).stream()
+                        .map(stage -> stageExecutions.get(stage.getStageId()))
+                        .filter(Objects::nonNull)
                         .collect(toImmutableList());
-                if (!childStageExecutions.isEmpty()) {
-                    stageExecution.addStateChangeListener(newState -> {
-                        if (newState == FLUSHING || newState.isDone()) {
-                            childStageExecutions.forEach(StageExecution::cancel);
-                        }
-                    });
+                if (parentStageExecutions.isEmpty()) {
+                    continue;
                 }
+                // cancel the stage once none of its consumers needs more input
+                StateChangeListener<StageExecution.State> listener = _ -> {
+                    if (parentStageExecutions.stream().allMatch(parent -> parent.getState() == FLUSHING || parent.getState().isDone())) {
+                        stageExecution.cancel();
+                    }
+                };
+                parentStageExecutions.forEach(parent -> parent.addStateChangeListener(listener));
             }
 
             Set<StageId> finishedStages = ConcurrentHashMap.newKeySet();
