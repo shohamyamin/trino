@@ -102,6 +102,7 @@ import static io.trino.parquet.reader.PageReader.createPageReader;
 import static io.trino.spi.block.Bitmap.isSet;
 import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VariantType.VARIANT;
+import static java.lang.Math.clamp;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static java.lang.Math.toIntExact;
@@ -116,8 +117,9 @@ public class ParquetReader
 {
     private static final Logger log = Logger.get(ParquetReader.class);
 
-    private static final int INITIAL_BATCH_SIZE = 1;
     private static final int BATCH_SIZE_GROWTH_FACTOR = 2;
+    // Decoded values can be larger than their uncompressed encoded size, for example dictionary encoded values
+    private static final int INITIAL_BATCH_SIZE_ESTIMATE_MARGIN = 4;
     private static final int MAX_FIXED_WIDTH_SELECTED_PERCENTAGE = 5;
     private static final int MAX_NULLABLE_FIXED_WIDTH_SELECTED_PERCENTAGE = 20;
     private static final int MAX_DICTIONARY_SELECTED_PERCENTAGE = 10;
@@ -158,7 +160,7 @@ public class ParquetReader
     // File row numbers of the current batch, null unless the row number column is requested and the column index filter selected the rows
     private long[] currentBatchRowNumbers;
     private int batchSize;
-    private int nextBatchSize = INITIAL_BATCH_SIZE;
+    private int nextBatchSize;
     private final Map<Integer, ColumnReader> columnReaders;
     private final Map<Integer, SelectedPositionsPushdownCharacteristics> selectedPositionsPushdownCharacteristics = new HashMap<>();
     private final Map<Integer, Double> maxBytesPerCell;
@@ -246,6 +248,7 @@ public class ParquetReader
         this.currentRowGroupMemoryContext = memoryContext.newAggregatedMemoryContext();
         this.options = requireNonNull(options, "options is null");
         this.maxBatchSize = options.getMaxReadBlockRowCount();
+        this.nextBatchSize = initialBatchSize(rowGroups, primitiveFields, options);
         this.columnReaders = new HashMap<>();
         this.maxBytesPerCell = new HashMap<>();
         this.decryptionContext = requireNonNull(decryptionContext, "decryptionContext is null");
@@ -1022,6 +1025,32 @@ public class ParquetReader
     public int getSelectedPositionsPushdownCount()
     {
         return selectedPositionsPushdownCount;
+    }
+
+    /**
+     * Estimates the batch size from the uncompressed size of the first row group's column chunks, so that the
+     * batches do not ramp up from a single row. The estimate is reduced by a margin because decoded values can
+     * be larger than the encoded data, and the batch size is limited by the measured block sizes once the first
+     * batch is read.
+     */
+    private static int initialBatchSize(List<RowGroupInfo> rowGroups, List<PrimitiveField> primitiveFields, ParquetReaderOptions options)
+            throws ParquetCorruptionException
+    {
+        int maxBatchSize = options.getMaxReadBlockRowCount();
+        if (rowGroups.isEmpty()) {
+            return maxBatchSize;
+        }
+        PrunedBlockMetadata blockMetadata = rowGroups.getFirst().prunedBlockMetadata();
+        long uncompressedBytes = 0;
+        for (PrimitiveField field : primitiveFields) {
+            uncompressedBytes += blockMetadata.getColumnChunkMetaData(field.getDescriptor()).getTotalUncompressedSize();
+        }
+        if (blockMetadata.getRowCount() == 0 || uncompressedBytes <= 0) {
+            return maxBatchSize;
+        }
+        double bytesPerRow = (double) uncompressedBytes / blockMetadata.getRowCount();
+        long batchSize = (long) (options.getMaxReadBlockSize().toBytes() / (bytesPerRow * INITIAL_BATCH_SIZE_ESTIMATE_MARGIN));
+        return clamp(batchSize, 1, maxBatchSize);
     }
 
     private int nextBatch()

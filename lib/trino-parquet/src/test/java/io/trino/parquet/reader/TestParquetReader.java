@@ -392,8 +392,9 @@ public class TestParquetReader
                         ImmutableList.of(new Page(rowCount, columnA.build(), columnB.build()))),
                 ParquetReaderOptions.defaultOptions());
         ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, Optional.empty());
-        try (ParquetReader reader = createParquetReader(dataSource, parquetMetadata, newSimpleAggregatedMemoryContext(), types, columnNames)) {
-            // batch sizes grow from 1, skip to a page with at least 8 positions
+        ParquetReaderOptions readerOptions = ParquetReaderOptions.builder().withMaxReadBlockRowCount(8).build();
+        try (ParquetReader reader = createParquetReader(dataSource, parquetMetadata, readerOptions, newSimpleAggregatedMemoryContext(), types, columnNames, TupleDomain.all())) {
+            // skip to a page with at least 8 positions
             long firstRow = 0;
             SourcePage page = reader.nextPage();
             while (page.getPositionCount() < 8) {
@@ -613,7 +614,8 @@ public class TestParquetReader
                         ImmutableList.of(new Page(values.build()))),
                 ParquetReaderOptions.defaultOptions());
         ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, Optional.empty());
-        try (ParquetReader reader = createParquetReader(dataSource, parquetMetadata, newSimpleAggregatedMemoryContext(), types, columnNames)) {
+        ParquetReaderOptions readerOptions = ParquetReaderOptions.builder().withMaxReadBlockRowCount(1_024).build();
+        try (ParquetReader reader = createParquetReader(dataSource, parquetMetadata, readerOptions, newSimpleAggregatedMemoryContext(), types, columnNames, TupleDomain.all())) {
             int firstPosition = 0;
             SourcePage page = reader.nextPage();
             while (page.getPositionCount() < 128) {
@@ -751,13 +753,15 @@ public class TestParquetReader
                         ImmutableList.of(new Page(values.build()))),
                 ParquetReaderOptions.defaultOptions());
         ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, Optional.empty());
-        try (ParquetReader reader = createParquetReader(dataSource, parquetMetadata, newSimpleAggregatedMemoryContext(), types, columnNames)) {
+        ParquetReaderOptions readerOptions = ParquetReaderOptions.builder().withMaxReadBlockRowCount(2_048).build();
+        try (ParquetReader reader = createParquetReader(dataSource, parquetMetadata, readerOptions, newSimpleAggregatedMemoryContext(), types, columnNames, TupleDomain.all())) {
             long firstRow = 0;
             SourcePage page = reader.nextPage();
             while (page.getPositionCount() < 1_024) {
                 firstRow += page.getPositionCount();
                 page = reader.nextPage();
             }
+            int edgePagePositionCount = page.getPositionCount();
 
             int[] edgeRun = IntStream.range(0, 40).toArray();
             page.selectPositions(edgeRun, 0, edgeRun.length);
@@ -768,7 +772,7 @@ public class TestParquetReader
             assertThat(reader.getSelectedPositionsFallbackCount()).isOne();
             assertThat(reader.getMetrics().getMetrics()).containsEntry(SELECTED_POSITIONS_PUSHDOWNS, new LongCount(0));
 
-            firstRow += 1_024;
+            firstRow += edgePagePositionCount;
             page = reader.nextPage();
             int[] interiorRun = IntStream.range(400, 480).toArray();
             page.selectPositions(interiorRun, 0, interiorRun.length);
@@ -819,7 +823,7 @@ public class TestParquetReader
         try (ParquetReader reader = createParquetReader(
                 dataSource,
                 parquetMetadata,
-                ParquetReaderOptions.defaultOptions(),
+                ParquetReaderOptions.builder().withMaxReadBlockRowCount(8).build(),
                 newSimpleAggregatedMemoryContext(),
                 types,
                 columnNames,
@@ -901,19 +905,52 @@ public class TestParquetReader
                 readerOptions);
         ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, Optional.empty());
         try (ParquetReader reader = createParquetReader(dataSource, parquetMetadata, readerOptions, newSimpleAggregatedMemoryContext(), types, columnNames, TupleDomain.all())) {
-            for (int expectedBatchSize : new int[] {1, 2, 4, 8, 16}) {
-                SourcePage page = reader.nextPage();
-                assertThat(page.getPositionCount()).isEqualTo(expectedBatchSize);
-                assertThat(page.getBlock(0).getPositionCount()).isEqualTo(expectedBatchSize);
-            }
-            for (int expectedBatchSize : new int[] {32, 64, 128}) {
-                SourcePage page = reader.nextPage();
-                assertThat(page.getPositionCount()).isEqualTo(expectedBatchSize);
-                page.selectPositions(new int[] {0}, 0, 1);
-                assertThat(page.getBlock(0).getPositionCount()).isEqualTo(1);
-            }
+            SourcePage page = reader.nextPage();
+            int batchSize = page.getPositionCount();
+            assertThat(page.getBlock(0).getPositionCount()).isEqualTo(batchSize);
 
-            assertThat(reader.nextPage().getPositionCount()).isEqualTo(256);
+            page = reader.nextPage();
+            assertThat(page.getPositionCount()).isEqualTo(batchSize * 2);
+            page.selectPositions(new int[] {0}, 0, 1);
+            assertThat(page.getBlock(0).getPositionCount()).isEqualTo(1);
+
+            // the size of the selected block is attributed to the input rows, so the batch size keeps growing
+            assertThat(reader.nextPage().getPositionCount()).isGreaterThan(batchSize * 2);
+        }
+    }
+
+    @Test
+    public void testInitialBatchSizeFromRowGroupMetadata()
+            throws IOException
+    {
+        List<String> columnNames = ImmutableList.of("narrow", "wide");
+        List<Type> types = ImmutableList.of(BIGINT, VARCHAR);
+        int rowCount = 1_000;
+        BlockBuilder narrow = BIGINT.createFixedSizeBlockBuilder(rowCount);
+        BlockBuilder wide = VARCHAR.createBlockBuilder(null, rowCount);
+        for (int position = 0; position < rowCount; position++) {
+            BIGINT.writeLong(narrow, position);
+            VARCHAR.writeSlice(wide, utf8Slice("%08d".formatted(position) + "x".repeat(992)));
+        }
+        ParquetReaderOptions readerOptions = ParquetReaderOptions.builder()
+                .withMaxReadBlockSize(DataSize.ofBytes(100_000))
+                .withMaxReadBlockRowCount(rowCount)
+                .build();
+        ParquetDataSource dataSource = new TestingParquetDataSource(
+                writeParquetFile(ParquetWriterOptions.builder().build(), types, columnNames, ImmutableList.of(new Page(narrow.build(), wide.build()))),
+                readerOptions);
+        ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, Optional.empty());
+
+        // narrow rows start with the largest batch
+        try (ParquetReader reader = createParquetReader(dataSource, parquetMetadata, readerOptions, newSimpleAggregatedMemoryContext(), ImmutableList.of(BIGINT), ImmutableList.of("narrow"), TupleDomain.all())) {
+            assertThat(reader.nextPage().getPositionCount()).isEqualTo(rowCount);
+        }
+
+        // wide rows start with a batch which is a fraction of the max read block size
+        try (ParquetReader reader = createParquetReader(dataSource, parquetMetadata, readerOptions, newSimpleAggregatedMemoryContext(), types, columnNames, TupleDomain.all())) {
+            SourcePage page = reader.nextPage();
+            assertThat(page.getPositionCount()).isBetween(2, 100_000 / 1_000);
+            assertThat(page.getBlock(1).getSizeInBytes()).isLessThanOrEqualTo(100_000);
         }
     }
 
