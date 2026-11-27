@@ -19,6 +19,7 @@ import io.trino.operator.HashArraySizeSupplier;
 import io.trino.operator.PagesHashStrategy;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import it.unimi.dsi.fastutil.longs.LongArrayList;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
@@ -29,12 +30,12 @@ import java.util.List;
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
-import static io.airlift.slice.SizeOf.sizeOfIntArray;
 import static io.airlift.slice.SizeOf.sizeOfLongArray;
 import static io.airlift.units.DataSize.Unit.KILOBYTE;
 import static io.trino.operator.SyntheticAddress.decodePosition;
 import static io.trino.operator.SyntheticAddress.decodeSliceIndex;
 import static io.trino.operator.join.PagesHash.getHashPosition;
+import static io.trino.spi.StandardErrorCode.GENERIC_INSUFFICIENT_RESOURCES;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
@@ -49,14 +50,18 @@ public final class BigintPagesHash
 {
     private static final int INSTANCE_SIZE = instanceSize(BigintPagesHash.class);
     private static final DataSize CACHE_SIZE = DataSize.of(128, KILOBYTE);
+    // two longs per slot must fit in a single array
+    private static final int MAX_HASH_SIZE = 1 << 29;
+    private static final long EMPTY_SLOT = -1;
 
     private final LongArrayList addresses;
     private final List<Block> joinChannelBlocks;
     private final PagesHashStrategy pagesHashStrategy;
 
     private final int mask;
-    private final int[] keys;
-    private final long[] values;
+    // slot i keeps its join key value at index 2 * i and its address index, or EMPTY_SLOT, at index 2 * i + 1,
+    // so that probing a slot reads a single cache line
+    private final long[] hashTable;
     private final long size;
 
     public BigintPagesHash(
@@ -78,11 +83,12 @@ public final class BigintPagesHash
 
         // reserve memory for the arrays
         int hashSize = hashArraySizeSupplier.getHashArraySize(addresses.size());
+        if (hashSize > MAX_HASH_SIZE) {
+            throw new TrinoException(GENERIC_INSUFFICIENT_RESOURCES, "Size of join hash table cannot exceed %s entries".formatted(MAX_HASH_SIZE));
+        }
 
         mask = hashSize - 1;
-        keys = new int[hashSize];
-        values = new long[addresses.size()];
-        Arrays.fill(keys, -1);
+        hashTable = createHashTable(hashSize);
 
         // We will process addresses in batches, to improve spatial and temporal memory locality
         int positionsInStep = Math.min(addresses.size() + 1, (int) CACHE_SIZE.toBytes() / Integer.SIZE);
@@ -96,7 +102,16 @@ public final class BigintPagesHash
         }
 
         size = sizeOf(addresses.elements()) + pagesHashStrategy.getSizeInBytes() +
-                sizeOf(keys) + sizeOf(values);
+                sizeOf(hashTable);
+    }
+
+    private static long[] createHashTable(int hashSize)
+    {
+        long[] hashTable = new long[2 * hashSize];
+        for (int i = 1; i < hashTable.length; i += 2) {
+            hashTable[i] = EMPTY_SLOT;
+        }
+        return hashTable;
     }
 
     private void indexPages(LongArrayList addresses, PositionLinks.FactoryBuilder positionLinks, int stepBeginPosition, int stepSize)
@@ -122,22 +137,21 @@ public final class BigintPagesHash
     private void insertValue(PositionLinks.FactoryBuilder positionLinks, int addressIndex, long value, int pos)
     {
         // look for an empty slot or a slot containing this key
-        while (keys[pos] != -1) {
-            int currentKey = keys[pos];
-            if (value == values[currentKey]) {
+        while (hashTable[2 * pos + 1] != EMPTY_SLOT) {
+            if (value == hashTable[2 * pos]) {
                 // found a slot for this key
                 // link the new key position to the current key position
-                addressIndex = positionLinks.link(addressIndex, currentKey);
+                addressIndex = positionLinks.link(addressIndex, (int) hashTable[2 * pos + 1]);
 
-                // key[pos] updated outside of this loop
+                // the slot is updated outside of this loop
                 break;
             }
             // increment position and mask to handler wrap around
             pos = (pos + 1) & mask;
         }
 
-        keys[pos] = addressIndex;
-        values[addressIndex] = value;
+        hashTable[2 * pos] = value;
+        hashTable[2 * pos + 1] = addressIndex;
     }
 
     @Override
@@ -164,14 +178,17 @@ public final class BigintPagesHash
         long value = BIGINT.getLong(hashChannelsPage.getBlock(0), position);
         int pos = getHashPosition(value, mask);
 
-        while (keys[pos] != -1) {
-            if (value == values[keys[pos]]) {
-                return keys[pos];
+        while (true) {
+            long addressIndex = hashTable[2 * pos + 1];
+            if (addressIndex == EMPTY_SLOT) {
+                return -1;
+            }
+            if (value == hashTable[2 * pos]) {
+                return (int) addressIndex;
             }
             // increment position and mask to handler wrap around
             pos = (pos + 1) & mask;
         }
-        return -1;
     }
 
     @Override
@@ -191,26 +208,15 @@ public final class BigintPagesHash
 
         extractAndHashValues(positions, hashChannelsPage, positionCount, incomingValues, hashPositions);
 
-        int[] found = new int[positionCount];
-        int foundCount = 0;
         int[] result = new int[positionCount];
         Arrays.fill(result, -1);
-        int[] foundKeys = new int[positionCount];
+        int[] remaining = new int[positionCount];
 
         // Search for positions in the hash array. This is the most CPU-consuming part as
-        // it relies on random memory accesses
-        findPositions(positionCount, hashPositions, foundKeys);
-        // Found positions are put into `found` array
-        for (int i = 0; i < positionCount; i++) {
-            if (foundKeys[i] != -1) {
-                found[foundCount++] = i;
-            }
-        }
-
-        // At this step we determine if the found keys were indeed the proper ones or it is a hash collision.
-        // The result array is updated for the found ones, while the collisions land into `remaining` array.
-        int remainingCount = checkFoundPositions(incomingValues, found, foundCount, result, foundKeys);
-        int[] remaining = found; // Rename for readability
+        // it relies on random memory accesses. A slot keeps both the key value and the address index,
+        // so a single memory access determines if the position matches or it is a hash collision.
+        // The result array is updated for the matching ones, while the collisions land into `remaining` array.
+        int remainingCount = findPositions(incomingValues, hashPositions, result, remaining);
 
         // At this point for any reasoable load factor of a hash array (< .75), there is no more than
         // 10 - 15% of positions left. We search for them in a sequential order and update the result array.
@@ -225,9 +231,13 @@ public final class BigintPagesHash
             int index = remaining[i];
             int position = (hashPositions[index] + 1) & mask; // hashPositions[index] position has already been checked
 
-            while (keys[position] != -1) {
-                if (values[keys[position]] == incomingValues[index]) {
-                    result[index] = keys[position];
+            while (true) {
+                long addressIndex = hashTable[2 * position + 1];
+                if (addressIndex == EMPTY_SLOT) {
+                    break;
+                }
+                if (hashTable[2 * position] == incomingValues[index]) {
+                    result[index] = (int) addressIndex;
                     break;
                 }
                 // increment position and mask to handler wrap around
@@ -236,27 +246,22 @@ public final class BigintPagesHash
         }
     }
 
-    private int checkFoundPositions(long[] incomingValues, int[] found, int foundCount, int[] result, int[] foundKeys)
+    private int findPositions(long[] incomingValues, int[] hashPositions, int[] result, int[] remaining)
     {
-        int[] remaining = found; // Rename for readability
         int remainingCount = 0;
-        for (int i = 0; i < foundCount; i++) {
-            int index = found[i];
-            if (values[foundKeys[index]] == incomingValues[index]) {
-                result[index] = foundKeys[index];
-            }
-            else {
-                remaining[remainingCount++] = index;
+        for (int i = 0; i < hashPositions.length; i++) {
+            int position = hashPositions[i];
+            long addressIndex = hashTable[2 * position + 1];
+            if (addressIndex != EMPTY_SLOT) {
+                if (hashTable[2 * position] == incomingValues[i]) {
+                    result[i] = (int) addressIndex;
+                }
+                else {
+                    remaining[remainingCount++] = i;
+                }
             }
         }
         return remainingCount;
-    }
-
-    private void findPositions(int positionCount, int[] hashPositions, int[] foundKeys)
-    {
-        for (int i = 0; i < positionCount; i++) {
-            foundKeys[i] = keys[hashPositions[i]];
-        }
     }
 
     private void extractAndHashValues(int[] positions, Page hashChannelsPage, int positionCount, long[] incomingValues, int[] hashPositions)
@@ -296,7 +301,7 @@ public final class BigintPagesHash
         return sizeOf(addresses.elements()) +
                 (channels.size() > 0 ? sizeOf(channels.get(0).elements()) * channels.size() : 0) +
                 blocksSizeInBytes +
-                sizeOfIntArray(hashArraySizeSupplier.getHashArraySize(positionCount)) +
-                sizeOfLongArray(positionCount);
+                // the hash table keeps two longs per slot; computed as two arrays to avoid int overflow
+                2 * sizeOfLongArray(hashArraySizeSupplier.getHashArraySize(positionCount));
     }
 }
