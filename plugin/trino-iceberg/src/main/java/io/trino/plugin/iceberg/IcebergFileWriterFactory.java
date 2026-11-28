@@ -87,6 +87,7 @@ import static io.trino.plugin.iceberg.IcebergSessionProperties.getParquetWriterP
 import static io.trino.plugin.iceberg.IcebergSessionProperties.getParquetWriterPageValueCount;
 import static io.trino.plugin.iceberg.IcebergSessionProperties.getParquetWriterRowGroupMaxRowCount;
 import static io.trino.plugin.iceberg.IcebergSessionProperties.isOrcWriterValidate;
+import static io.trino.plugin.iceberg.IcebergSessionProperties.isParquetWriterPageIndexEnabled;
 import static io.trino.plugin.iceberg.IcebergTableProperties.ORC_BLOOM_FILTER_FPP_PROPERTY;
 import static io.trino.plugin.iceberg.IcebergUtil.getHiveCompressionCodec;
 import static io.trino.plugin.iceberg.IcebergUtil.getOrcBloomFilterColumns;
@@ -202,6 +203,7 @@ public class IcebergFileWriterFactory
                     .setBatchSize(getParquetWriterBatchSize(session))
                     .setBloomFilterColumns(getParquetBloomFilterColumns(storageProperties))
                     .setUseDeltaLengthByteArrayEncoding(getParquetWriterDeltaLengthByteArrayEncodingEnabled(session))
+                    .setWritePageIndex(isParquetWriterPageIndexEnabled(session))
                     .build();
 
             HiveCompressionCodec compressionCodec = getHiveCompressionCodec(PARQUET, storageProperties)

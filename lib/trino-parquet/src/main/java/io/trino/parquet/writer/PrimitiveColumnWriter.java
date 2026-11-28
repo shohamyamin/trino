@@ -41,6 +41,10 @@ import org.apache.parquet.format.DictionaryPageHeader;
 import org.apache.parquet.format.PageEncodingStats;
 import org.apache.parquet.format.PageHeader;
 import org.apache.parquet.format.PageType;
+import org.apache.parquet.internal.column.columnindex.ColumnIndexBuilder;
+import org.apache.parquet.internal.column.columnindex.OffsetIndexBuilder;
+import org.apache.parquet.schema.PrimitiveType;
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -57,6 +61,8 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.slice.SizeOf.instanceSize;
 import static io.trino.parquet.ParquetMetadataConverter.convertEncodingStats;
 import static io.trino.parquet.ParquetMetadataConverter.getEncoding;
+import static io.trino.parquet.ParquetMetadataConverter.isMinMaxStatsSupported;
+import static io.trino.parquet.ParquetMetadataConverter.toTypeDefinedOrder;
 import static io.trino.parquet.writer.ParquetCompressor.getCompressor;
 import static io.trino.parquet.writer.ParquetDataOutput.createDataOutput;
 import static io.trino.parquet.writer.repdef.DefLevelWriterProvider.getRootDefinitionLevelWriter;
@@ -78,6 +84,8 @@ public class PrimitiveColumnWriter
     // ParquetMetadataConverter.MAX_STATS_SIZE is 4096, we need a value which would guarantee that min and max
     // don't add up to 4096 (so less than 2048). Using 1K as that is big enough for most use cases.
     private static final int MAX_STATISTICS_LENGTH_IN_BYTES = 1024;
+    // Same as org.apache.parquet.column.ParquetProperties.DEFAULT_COLUMN_INDEX_TRUNCATE_LENGTH
+    private static final int COLUMN_INDEX_TRUNCATE_LENGTH = 64;
 
     private final ColumnDescriptor columnDescriptor;
     private final CompressionCodec compressionCodec;
@@ -92,6 +100,7 @@ public class PrimitiveColumnWriter
     // current page stats
     private int valueCount;
     private int currentPageNullCounts;
+    private int currentPageRowCount;
 
     // column meta data stats
     private final Set<Encoding> encodings = new HashSet<>();
@@ -99,6 +108,11 @@ public class PrimitiveColumnWriter
     private final Map<org.apache.parquet.format.Encoding, Integer> dictionaryPagesWithEncoding = new HashMap<>();
     private final Statistics<?> columnStatistics;
     private final Optional<BloomFilter> bloomFilter;
+    // page index: page locations for every column, page statistics when they are usable
+    @Nullable
+    private final OffsetIndexBuilder offsetIndexBuilder;
+    @Nullable
+    private final ColumnIndexBuilder columnIndexBuilder;
     private long totalCompressedSize;
     private long totalUnCompressedSize;
     private long dictionaryPageCompressedSize;
@@ -128,7 +142,8 @@ public class PrimitiveColumnWriter
             CompressionBuffers compressionBuffers,
             int pageSizeThreshold,
             int pageValueCountLimit,
-            Optional<BloomFilter> bloomFilter)
+            Optional<BloomFilter> bloomFilter,
+            boolean writePageIndex)
     {
         this.columnDescriptor = requireNonNull(columnDescriptor, "columnDescriptor is null");
         this.maxDefinitionLevel = columnDescriptor.getMaxDefinitionLevel();
@@ -143,6 +158,23 @@ public class PrimitiveColumnWriter
         this.columnStatistics = createStatistics(columnDescriptor.getPrimitiveType());
         this.compressedOutputStream = new ChunkedSliceOutput(MINIMUM_OUTPUT_BUFFER_CHUNK_SIZE, MAXIMUM_OUTPUT_BUFFER_CHUNK_SIZE);
         this.bloomFilter = requireNonNull(bloomFilter, "bloomFilter is null");
+        this.offsetIndexBuilder = writePageIndex ? OffsetIndexBuilder.getBuilder() : null;
+        this.columnIndexBuilder = writePageIndex ? createColumnIndexBuilder(columnDescriptor.getPrimitiveType()) : null;
+    }
+
+    @Nullable
+    private static ColumnIndexBuilder createColumnIndexBuilder(PrimitiveType type)
+    {
+        // Floating point page bounds are not written: NaN and signed zero handling of page
+        // statistics differs between Parquet versions, so readers could not rely on them
+        if (type.getPrimitiveTypeName() == PrimitiveTypeName.FLOAT || type.getPrimitiveTypeName() == PrimitiveTypeName.DOUBLE) {
+            return null;
+        }
+        if (!isMinMaxStatsSupported(toTypeDefinedOrder(type))) {
+            return null;
+        }
+        // binary bounds longer than the limit are truncated to a shorter lower bound and a larger upper bound
+        return ColumnIndexBuilder.getBuilder(toTypeDefinedOrder(type), COLUMN_INDEX_TRUNCATE_LENGTH);
     }
 
     @Override
@@ -162,6 +194,7 @@ public class PrimitiveColumnWriter
         DefLevelWriterProvider.ValuesCount valuesCount = rootDefinitionLevelWriter.writeDefinitionLevels();
         currentPageNullCounts += valuesCount.totalValuesCount() - valuesCount.maxDefinitionLevelValuesCount();
         valueCount += valuesCount.totalValuesCount();
+        currentPageRowCount += columnChunk.getRowCount();
 
         if (columnDescriptor.getMaxRepetitionLevel() > 0) {
             // write repetition levels for nested types
@@ -200,7 +233,9 @@ public class PrimitiveColumnWriter
                 dataStreams.data(),
                 dataStreams.dictionaryPageSize(),
                 isOnlyDictionaryEncodingPages ? Optional.empty() : dataStreams.bloomFilter(),
-                columnMetaData));
+                columnMetaData,
+                Optional.ofNullable(columnIndexBuilder).map(ColumnIndexBuilder::build),
+                Optional.ofNullable(offsetIndexBuilder).map(OffsetIndexBuilder::build)));
     }
 
     // Returns ColumnMetaData that offset is invalid
@@ -277,9 +312,18 @@ public class PrimitiveColumnWriter
         statistics.incrementNumNulls(currentPageNullCounts);
         columnStatistics.mergeStatistics(statistics);
 
+        // pages end at row boundaries, so every page starts a new row also for repeated columns
+        if (offsetIndexBuilder != null) {
+            offsetIndexBuilder.add(pageCompressedSize, currentPageRowCount);
+        }
+        if (columnIndexBuilder != null) {
+            columnIndexBuilder.add(statistics);
+        }
+
         // reset page stats
         valueCount = 0;
         currentPageNullCounts = 0;
+        currentPageRowCount = 0;
 
         repetitionLevelWriter.reset();
         definitionLevelWriter.reset();

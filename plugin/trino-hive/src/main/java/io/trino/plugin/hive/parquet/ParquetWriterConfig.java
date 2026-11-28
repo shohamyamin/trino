@@ -53,6 +53,7 @@ public class ParquetWriterConfig
     private int batchSize = ParquetWriterOptions.DEFAULT_BATCH_SIZE;
     private double validationPercentage = 5;
     private boolean deltaLengthByteArrayEncodingEnabled = true;
+    private boolean pageIndexEnabled = ParquetWriterOptions.DEFAULT_WRITE_PAGE_INDEX;
 
     @MaxDataSize(PARQUET_WRITER_MAX_ROW_GROUP_SIZE)
     public DataSize getRowGroupSize()
@@ -148,6 +149,19 @@ public class ParquetWriterConfig
     public ParquetWriterConfig setDeltaLengthByteArrayEncodingEnabled(boolean deltaLengthByteArrayEncodingEnabled)
     {
         this.deltaLengthByteArrayEncodingEnabled = deltaLengthByteArrayEncodingEnabled;
+        return this;
+    }
+
+    public boolean isPageIndexEnabled()
+    {
+        return pageIndexEnabled;
+    }
+
+    @Config("parquet.writer.page-index-enabled")
+    @ConfigDescription("Write column indexes (page statistics) and offset indexes (page locations) to Parquet files")
+    public ParquetWriterConfig setPageIndexEnabled(boolean pageIndexEnabled)
+    {
+        this.pageIndexEnabled = pageIndexEnabled;
         return this;
     }
 }

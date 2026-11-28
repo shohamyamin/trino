@@ -86,6 +86,13 @@ with Parquet files performed by supported object storage connectors:
   - Use `DELTA_LENGTH_BYTE_ARRAY` encoding for `BYTE_ARRAY` columns when
     the Parquet dictionary encoding is not effective.
   - `true`
+* - `parquet.writer.page-index-enabled`
+  - Write the Parquet page index: column indexes with the minimum, maximum and
+    null count of every page, and offset indexes with the page locations, so
+    that readers can skip pages. Page bounds are not written for floating point
+    columns. The equivalent catalog session property in the Iceberg connector
+    is `parquet_writer_page_index_enabled`.
+  - `true`
 * - `parquet.use-bloom-filter`
   - Whether bloom filters are used for predicate pushdown when reading Parquet
     files. Set this property to `false` to disable the usage of bloom filters by

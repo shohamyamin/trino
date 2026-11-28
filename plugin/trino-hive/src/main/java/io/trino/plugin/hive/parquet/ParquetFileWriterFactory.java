@@ -70,6 +70,7 @@ public class ParquetFileWriterFactory
     private final TypeManager typeManager;
     private final DateTimeZone parquetTimeZone;
     private final boolean useDeltaLengthByteArrayEncoding;
+    private final boolean writePageIndex;
     private final FileFormatDataSourceStats readStats;
 
     @Inject
@@ -86,6 +87,7 @@ public class ParquetFileWriterFactory
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
         this.parquetTimeZone = hiveConfig.getParquetDateTimeZone();
         this.useDeltaLengthByteArrayEncoding = parquetWriterConfig.isDeltaLengthByteArrayEncodingEnabled();
+        this.writePageIndex = parquetWriterConfig.isPageIndexEnabled();
         this.readStats = requireNonNull(readStats, "readStats is null");
     }
 
@@ -114,6 +116,7 @@ public class ParquetFileWriterFactory
                 .setBatchSize(HiveSessionProperties.getParquetBatchSize(session))
                 .setBloomFilterColumns(getParquetBloomFilterColumns(schema))
                 .setUseDeltaLengthByteArrayEncoding(useDeltaLengthByteArrayEncoding)
+                .setWritePageIndex(writePageIndex)
                 .build();
 
         List<String> fileColumnNames = getColumnNames(schema);
