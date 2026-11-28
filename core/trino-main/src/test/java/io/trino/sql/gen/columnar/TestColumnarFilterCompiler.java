@@ -46,13 +46,17 @@ import static io.trino.block.BlockAssertions.createDoubleSequenceBlock;
 import static io.trino.block.BlockAssertions.createLongDecimalSequenceBlock;
 import static io.trino.block.BlockAssertions.createLongDecimalsBlock;
 import static io.trino.block.BlockAssertions.createLongSequenceBlock;
+import static io.trino.block.BlockAssertions.createLongsBlock;
 import static io.trino.block.BlockAssertions.createStringSequenceBlock;
 import static io.trino.block.BlockAssertions.createStringsBlock;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.VarcharType.VARCHAR;
+import static io.trino.sql.ir.ComparisonOperator.EQUAL;
 import static io.trino.sql.ir.ComparisonOperator.GREATER_THAN;
+import static io.trino.sql.ir.ComparisonOperator.LESS_THAN;
+import static io.trino.sql.ir.ComparisonOperator.LESS_THAN_OR_EQUAL;
 import static io.trino.sql.ir.TestingIr.comparison;
 import static io.trino.testing.TestingConnectorSession.SESSION;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -246,19 +250,51 @@ public class TestColumnarFilterCompiler
     }
 
     @Test
-    public void testFilterTemplateReuse()
+    public void testCallFilterSharesClassAcrossConstants()
     {
         ColumnarFilterCompiler compiler = FUNCTION_RESOLUTION.getColumnarFilterCompiler(100);
         Map<Symbol, Integer> layout = ImmutableMap.of(new Symbol(BIGINT, "$col_0"), 0);
 
-        // same structure with different constants shares one compiled template
+        // same structure with different constants shares one generated class
         assertThat(filterGreaterThan(compiler, layout, 2L)).isEqualTo(2);
         assertThat(filterGreaterThan(compiler, layout, 0L)).isEqualTo(4);
+        assertThat(filterGreaterThan(compiler, layout, -1L)).isEqualTo(5);
+        assertThat(compiler.getCallFilterCache().getRequestCount()).isEqualTo(3);
+        assertThat(compiler.getCallFilterCache().getLoadCount()).isEqualTo(1);
 
-        // two lookups, one template stored on the first miss and hit by the second
-        assertThat(compiler.getFilterTemplateCache().getRequestCount()).isEqualTo(2);
-        assertThat(compiler.getFilterTemplateCache().size()).isEqualTo(1);
-        assertThat(compiler.getFilterTemplateCache().getHitRate()).isEqualTo(0.5);
+        ColumnarFilter first = compiler.generateFilter(CHAR_VARCHAR_COERCION, comparison(GREATER_THAN, new Reference(BIGINT, "$col_0"), new Constant(BIGINT, 42L)), layout).orElseThrow().get();
+        ColumnarFilter second = compiler.generateFilter(CHAR_VARCHAR_COERCION, comparison(GREATER_THAN, new Reference(BIGINT, "$col_0"), new Constant(BIGINT, 77L)), layout).orElseThrow().get();
+        assertThat(second.getClass()).isEqualTo(first.getClass());
+        assertThat(compiler.getCallFilterCache().getLoadCount()).isEqualTo(1);
+
+        // the constant on the other side of the comparison is a different shape
+        ColumnarFilter swapped = compiler.generateFilter(CHAR_VARCHAR_COERCION, comparison(LESS_THAN_OR_EQUAL, new Constant(BIGINT, 3L), new Reference(BIGINT, "$col_0")), layout).orElseThrow().get();
+        assertThat(swapped.getClass()).isNotEqualTo(first.getClass());
+        // values >= 3 at positions 3, 4
+        assertMatchCount(swapped, createLongSequenceBlock(0, 5), 2);
+        assertMatchCount(swapped, createLongsBlock(5L, null, 1L, 3L, null), 2);
+    }
+
+    @Test
+    public void testCallFilterConstantTypes()
+    {
+        ColumnarFilterCompiler compiler = FUNCTION_RESOLUTION.getColumnarFilterCompiler(100);
+
+        Map<Symbol, Integer> varcharLayout = ImmutableMap.of(new Symbol(VARCHAR, "$col_0"), 0);
+        ColumnarFilter varcharFilter1 = compiler.generateFilter(CHAR_VARCHAR_COERCION, comparison(EQUAL, new Reference(VARCHAR, "$col_0"), new Constant(VARCHAR, utf8Slice("3"))), varcharLayout).orElseThrow().get();
+        ColumnarFilter varcharFilter2 = compiler.generateFilter(CHAR_VARCHAR_COERCION, comparison(EQUAL, new Reference(VARCHAR, "$col_0"), new Constant(VARCHAR, utf8Slice("7"))), varcharLayout).orElseThrow().get();
+        assertThat(varcharFilter2.getClass()).isEqualTo(varcharFilter1.getClass());
+        assertMatchCount(varcharFilter1, createStringSequenceBlock(0, 10), 1);
+        assertMatchCount(varcharFilter2, createStringsBlock("7", null, "7", "3"), 2);
+
+        DecimalType decimalType = createDecimalType(19);
+        Map<Symbol, Integer> decimalLayout = ImmutableMap.of(new Symbol(decimalType, "$col_0"), 0);
+        ColumnarFilter decimalFilter = compiler.generateFilter(CHAR_VARCHAR_COERCION, comparison(LESS_THAN, new Reference(decimalType, "$col_0"), new Constant(decimalType, Int128.valueOf(4))), decimalLayout).orElseThrow().get();
+        assertMatchCount(decimalFilter, createLongDecimalSequenceBlock(0, 10, decimalType), 4);
+
+        Map<Symbol, Integer> doubleLayout = ImmutableMap.of(new Symbol(DOUBLE, "$col_0"), 0);
+        ColumnarFilter doubleFilter = compiler.generateFilter(CHAR_VARCHAR_COERCION, comparison(GREATER_THAN, new Reference(DOUBLE, "$col_0"), new Constant(DOUBLE, 6.5)), doubleLayout).orElseThrow().get();
+        assertMatchCount(doubleFilter, createDoubleSequenceBlock(0, 10), 3);
     }
 
     @Test
@@ -297,16 +333,10 @@ public class TestColumnarFilterCompiler
         ColumnarFilterCompiler compiler = FUNCTION_RESOLUTION.getColumnarFilterCompiler(100);
         Map<Symbol, Integer> layout = ImmutableMap.of(new Symbol(BIGINT, "$col_0"), 0);
 
-        ColumnarFilter first = compiler.generateFilter(
+        ColumnarFilter filter = compiler.generateFilter(
                 CHAR_VARCHAR_COERCION, comparison(GREATER_THAN, new Reference(BIGINT, "$col_0"), new Constant(BIGINT, 42L)), layout).orElseThrow().get();
-        // the second filter is defined from the cached template and must describe its own
-        // literal, not the literal of the compilation that created the template
-        ColumnarFilter second = compiler.generateFilter(
-                CHAR_VARCHAR_COERCION, comparison(GREATER_THAN, new Reference(BIGINT, "$col_0"), new Constant(BIGINT, 77L)), layout).orElseThrow().get();
-
-        assertThat(compiler.getFilterTemplateCache().getHitRate()).isEqualTo(0.5);
-        assertThat(first.toString()).startsWith("ColumnarFilter{").contains("42");
-        assertThat(second.toString()).contains("77").doesNotContain("42");
+        // the class is shared by all constant values, so it describes the call shape only
+        assertThat(filter.toString()).startsWith("ColumnarFilter{").contains("less_than");
     }
 
     private static int filterGreaterThan(ColumnarFilterCompiler compiler, Map<Symbol, Integer> layout, long value)

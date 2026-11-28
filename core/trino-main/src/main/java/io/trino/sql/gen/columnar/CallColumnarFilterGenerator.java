@@ -34,9 +34,9 @@ import io.trino.spi.function.FunctionNullability;
 import io.trino.spi.function.InvocationConvention;
 import io.trino.spi.function.ScalarFunctionImplementation;
 import io.trino.spi.type.FunctionType;
+import io.trino.spi.type.Type;
 import io.trino.sql.gen.Binding;
 import io.trino.sql.gen.CallSiteBinder;
-import io.trino.sql.gen.ClassTemplateCache;
 import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.Reference;
@@ -44,12 +44,14 @@ import io.trino.sql.planner.Symbol;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodType;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.bytecode.Access.FINAL;
 import static io.airlift.bytecode.Access.PRIVATE;
 import static io.airlift.bytecode.Access.PUBLIC;
@@ -64,10 +66,10 @@ import static io.trino.spi.function.InvocationConvention.InvocationArgumentConve
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.NEVER_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.DEFAULT_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
+import static io.trino.sql.gen.BytecodeUtils.generateToString;
 import static io.trino.sql.gen.BytecodeUtils.invoke;
 import static io.trino.sql.gen.BytecodeUtils.loadBindingHandle;
-import static io.trino.sql.gen.BytecodeUtils.loadConstant;
-import static io.trino.sql.gen.columnar.ColumnarFilterCompiler.createClassInstance;
+import static io.trino.sql.gen.columnar.ColumnarFilterCompiler.createClassInstanceDirect;
 import static io.trino.sql.gen.columnar.ColumnarFilterCompiler.declareBlockVariables;
 import static io.trino.sql.gen.columnar.ColumnarFilterCompiler.generateBlockMayHaveNull;
 import static io.trino.sql.gen.columnar.ColumnarFilterCompiler.generateBlockPositionNotNull;
@@ -108,9 +110,60 @@ public class CallColumnarFilterGenerator
         this.functionManager = requireNonNull(functionManager, "functionManager is null");
     }
 
-    public Class<? extends ColumnarFilter> generateColumnarFilter(ClassTemplateCache<ColumnarFilter> templates, Expression filter)
+    /**
+     * Returns the key of the class generated for this call. The class does not depend on the
+     * values of the constant arguments, which are passed to its constructor (see
+     * {@link #constantValues}), so all calls of the same function on the same input channels
+     * and constant types share one class, and one JIT compilation of it. This matters most
+     * for dynamic filters, which are compiled again with new range bounds on every update.
+     */
+    public CallFilterShape shape()
     {
-        return createClassInstance(templates, filter, this::defineFilterClass);
+        ImmutableList.Builder<Object> argumentShapes = ImmutableList.builder();
+        for (Expression argument : arguments) {
+            switch (argument) {
+                case Reference reference -> argumentShapes.add(layout.get(Symbol.from(reference)));
+                // boolean constants are compiled to bytecode constants
+                case Constant constant when constant.type().getJavaType() == boolean.class -> argumentShapes.add(new BooleanConstantShape((Boolean) constant.value()));
+                case Constant constant -> argumentShapes.add(new ConstantShape(constant.type()));
+                default -> throw new UnsupportedOperationException("Unsupported argument expression: " + argument);
+            }
+        }
+        return new CallFilterShape(function, argumentShapes.build());
+    }
+
+    /**
+     * Values of the constant arguments, other than boolean, in argument order, as expected by
+     * the constructor of the generated class.
+     */
+    public static Object[] constantValues(List<Expression> arguments)
+    {
+        return arguments.stream()
+                .filter(Constant.class::isInstance)
+                .map(Constant.class::cast)
+                .filter(constant -> constant.type().getJavaType() != boolean.class)
+                .map(Constant::value)
+                .toArray();
+    }
+
+    public record CallFilterShape(ResolvedFunction function, List<Object> argumentShapes)
+    {
+        public CallFilterShape
+        {
+            requireNonNull(function, "function is null");
+            argumentShapes = ImmutableList.copyOf(argumentShapes);
+        }
+    }
+
+    private record ConstantShape(Type type) {}
+
+    private record BooleanConstantShape(boolean value) {}
+
+    public Class<? extends ColumnarFilter> generateColumnarFilter()
+    {
+        CallSiteBinder callSiteBinder = new CallSiteBinder();
+        ClassDefinition classDefinition = defineFilterClass(callSiteBinder);
+        return createClassInstanceDirect(callSiteBinder, classDefinition);
     }
 
     private ClassDefinition defineFilterClass(CallSiteBinder callSiteBinder)
@@ -125,14 +178,34 @@ public class CallColumnarFilterGenerator
 
         FieldDefinition inputChannelsField = generateGetInputChannels(classDefinition);
 
-        generateFilterRangeMethod(classDefinition, callSiteBinder, cachedInstanceBinder);
-        generateFilterListMethod(classDefinition, callSiteBinder, cachedInstanceBinder);
+        // one field for each constant argument, other than boolean, set by the constructor
+        Map<Integer, FieldDefinition> constantFields = new HashMap<>();
+        for (int argument = 0; argument < arguments.size(); argument++) {
+            if (arguments.get(argument) instanceof Constant constant && constant.type().getJavaType() != boolean.class) {
+                Class<?> fieldType = callSiteBinder.getAccessibleType(constant.type().getJavaType());
+                constantFields.put(argument, classDefinition.declareField(a(PRIVATE, FINAL), "constant_" + argument, fieldType));
+            }
+        }
 
-        generateConstructor(classDefinition, cachedInstanceBinder, inputChannelsField);
+        generateFilterRangeMethod(classDefinition, callSiteBinder, cachedInstanceBinder, constantFields);
+        generateFilterListMethod(classDefinition, callSiteBinder, cachedInstanceBinder, constantFields);
+
+        generateConstructor(classDefinition, cachedInstanceBinder, inputChannelsField, constantFields);
+
+        String description = ColumnarFilter.class.getSimpleName() + "{" + function.signature() + ", arguments=" + shape().argumentShapes() + "}";
+        generateToString(classDefinition, callSiteBinder.bind(description, Object.class));
         return classDefinition;
     }
 
-    private void generateFilterRangeMethod(ClassDefinition classDefinition, CallSiteBinder callSiteBinder, CachedInstanceBinder cachedInstanceBinder)
+    // loads the constant fields into local variables once per batch, ahead of the loops
+    private static void declareConstantVariables(Map<Integer, FieldDefinition> constantFields, Scope scope, BytecodeBlock body)
+    {
+        constantFields.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(entry -> scope.declareVariable("constant_" + entry.getKey(), body, scope.getThis().getField(entry.getValue())));
+    }
+
+    private void generateFilterRangeMethod(ClassDefinition classDefinition, CallSiteBinder callSiteBinder, CachedInstanceBinder cachedInstanceBinder, Map<Integer, FieldDefinition> constantFields)
     {
         Parameter session = arg("session", ConnectorSession.class);
         Parameter outputPositions = arg("outputPositions", int[].class);
@@ -149,6 +222,7 @@ public class CallColumnarFilterGenerator
         BytecodeBlock body = method.getBody();
 
         declareBlockVariables(arguments, layout, page, scope, body);
+        declareConstantVariables(constantFields, scope, body);
 
         Variable outputPositionsCount = scope.declareVariable("outputPositionsCount", body, constantInt(0));
         Variable position = scope.declareVariable(int.class, "position");
@@ -199,7 +273,7 @@ public class CallColumnarFilterGenerator
         body.append(outputPositionsCount.ret());
     }
 
-    private void generateFilterListMethod(ClassDefinition classDefinition, CallSiteBinder callSiteBinder, CachedInstanceBinder cachedInstanceBinder)
+    private void generateFilterListMethod(ClassDefinition classDefinition, CallSiteBinder callSiteBinder, CachedInstanceBinder cachedInstanceBinder, Map<Integer, FieldDefinition> constantFields)
     {
         Parameter session = arg("session", ConnectorSession.class);
         Parameter outputPositions = arg("outputPositions", int[].class);
@@ -217,6 +291,7 @@ public class CallColumnarFilterGenerator
         BytecodeBlock body = method.getBody();
 
         declareBlockVariables(arguments, layout, page, scope, body);
+        declareConstantVariables(constantFields, scope, body);
 
         Variable outputPositionsCount = scope.declareVariable("outputPositionsCount", body, constantInt(0));
         Variable index = scope.declareVariable(int.class, "index");
@@ -315,14 +390,15 @@ public class CallColumnarFilterGenerator
             }
             currentParameterIndex++;
         }
-        for (Expression argumentExpression : arguments) {
+        for (int argument = 0; argument < arguments.size(); argument++) {
+            Expression argumentExpression = arguments.get(argument);
             if (argumentExpression instanceof Reference reference) {
                 Integer channel = layout.get(Symbol.from(reference));
                 checkState(channel != null, "Reference not in layout: %s", reference.name());
                 block.append(generateInputReference(scope.getVariable("block_" + channel), position));
             }
             else if (argumentExpression instanceof Constant constant) {
-                block.append(generateConstant(binder, constant));
+                block.append(generateConstant(scope, argument, constant));
             }
             else {
                 throw new UnsupportedOperationException(format("Unsupported argument expression: %s", argumentExpression));
@@ -368,35 +444,31 @@ public class CallColumnarFilterGenerator
         return blockAndPosition;
     }
 
-    private static BytecodeNode generateConstant(CallSiteBinder callSiteBinder, Constant constant)
+    private static BytecodeNode generateConstant(Scope scope, int argument, Constant constant)
     {
-        Object value = constant.value();
-        Class<?> javaType = constant.type().getJavaType();
-
         // boolean constants stay as bytecode constants: the two values change control flow
-        // shapes anyway and are part of the filter template key
-        if (javaType == boolean.class) {
+        // shapes anyway and are part of the class key
+        if (constant.type().getJavaType() == boolean.class) {
             BytecodeBlock block = new BytecodeBlock();
             if (isClassDumpEnabled()) {
                 block.comment("constant " + constant.type().getTypeDescriptor());
             }
-            return block.append(loadBoolean((Boolean) value));
+            return block.append(loadBoolean((Boolean) constant.value()));
         }
 
-        // All other constants, including primitives, are class data constants, so the
-        // generated bytecode depends only on the filter structure and can be shared
-        // across filters that differ only in constant values
-        Binding binding = callSiteBinder.bind(value, constant.type().getJavaType());
-
+        // All other constants, including primitives, are set by the constructor, so the
+        // generated class depends only on the filter structure and is shared by filters
+        // that differ only in constant values
         return new BytecodeBlock()
                 .setDescription("constant " + constant.type())
-                .append(loadConstant(binding));
+                .append(scope.getVariable("constant_" + argument));
     }
 
-    private static void generateConstructor(ClassDefinition classDefinition, CachedInstanceBinder cachedInstanceBinder, FieldDefinition inputChannelsField)
+    private static void generateConstructor(ClassDefinition classDefinition, CachedInstanceBinder cachedInstanceBinder, FieldDefinition inputChannelsField, Map<Integer, FieldDefinition> constantFields)
     {
         Parameter inputChannelsParam = arg("inputChannels", InputChannels.class);
-        MethodDefinition constructorDefinition = classDefinition.declareConstructor(a(PUBLIC), inputChannelsParam);
+        Parameter constantsParam = arg("constants", Object[].class);
+        MethodDefinition constructorDefinition = classDefinition.declareConstructor(a(PUBLIC), inputChannelsParam, constantsParam);
 
         BytecodeBlock body = constructorDefinition.getBody();
         Variable thisVariable = constructorDefinition.getThis();
@@ -406,6 +478,14 @@ public class CallColumnarFilterGenerator
                 .invokeConstructor(Object.class);
 
         body.append(thisVariable.setField(inputChannelsField, inputChannelsParam));
+        List<FieldDefinition> fields = constantFields.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .map(Map.Entry::getValue)
+                .collect(toImmutableList());
+        for (int constant = 0; constant < fields.size(); constant++) {
+            FieldDefinition field = fields.get(constant);
+            body.append(thisVariable.setField(field, constantsParam.getElement(constant).cast(field.getType())));
+        }
         cachedInstanceBinder.generateInitializations(thisVariable, body);
         body.ret();
     }

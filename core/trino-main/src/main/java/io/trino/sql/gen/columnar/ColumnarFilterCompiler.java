@@ -39,6 +39,7 @@ import io.trino.spi.type.Type;
 import io.trino.sql.PlannerContext;
 import io.trino.sql.gen.CallSiteBinder;
 import io.trino.sql.gen.ClassTemplateCache;
+import io.trino.sql.gen.columnar.CallColumnarFilterGenerator.CallFilterShape;
 import io.trino.sql.ir.Call;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.In;
@@ -78,6 +79,7 @@ import static io.trino.operator.project.PageFieldsToInputParametersRewriter.rewr
 import static io.trino.spi.StandardErrorCode.COMPILER_ERROR;
 import static io.trino.spi.StandardErrorCode.QUERY_EXCEEDED_COMPILER_LIMIT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.sql.gen.columnar.CallColumnarFilterGenerator.constantValues;
 import static io.trino.sql.gen.columnar.FilterEvaluator.isNotExpression;
 import static io.trino.sql.gen.columnar.IsNotNullColumnarFilter.createIsNotNullColumnarFilter;
 import static io.trino.sql.gen.columnar.IsNullColumnarFilter.createIsNullColumnarFilter;
@@ -101,6 +103,9 @@ public class ColumnarFilterCompiler
     private final NonEvictableCache<InSetDynamicFilterKey, Class<? extends ColumnarFilter>> inSetDynamicFilterCache;
     // Structurally identical filters with different literals share one compiled template
     private final ClassTemplateCache<ColumnarFilter> filterTemplates;
+    // One generated class per function call shape, shared by calls with different constant values
+    @Nullable
+    private final NonEvictableCache<CallFilterShape, Class<? extends ColumnarFilter>> callFilterCache;
 
     @Inject
     public ColumnarFilterCompiler(PlannerContext plannerContext, CompilerConfig config)
@@ -120,10 +125,15 @@ public class ColumnarFilterCompiler
                             .recordStats()
                             .maximumSize(expressionCacheSize));
             filterCacheStats = new CacheStatsMBean(filterCache);
+            callFilterCache = buildNonEvictableCache(
+                    CacheBuilder.newBuilder()
+                            .recordStats()
+                            .maximumSize(expressionCacheSize));
         }
         else {
             filterCache = null;
             filterCacheStats = null;
+            callFilterCache = null;
         }
         inSetDynamicFilterCache = buildNonEvictableCache(CacheBuilder.newBuilder().maximumSize(64));
     }
@@ -134,6 +144,14 @@ public class ColumnarFilterCompiler
     public CacheStatsMBean getFilterCache()
     {
         return filterCacheStats;
+    }
+
+    @Nullable
+    @Managed
+    @Nested
+    public CacheStatsMBean getCallFilterCache()
+    {
+        return callFilterCache == null ? null : new CacheStatsMBean(callFilterCache);
     }
 
     @Nullable
@@ -194,6 +212,19 @@ public class ColumnarFilterCompiler
 
         if (filterClass.isEmpty()) {
             return Optional.empty();
+        }
+        if (isCallFilter(filter)) {
+            // the class is shared by all calls of the same shape, and takes the constant values
+            Object[] constants = constantValues(((Call) filter).arguments());
+            MethodHandle constructor = filterConstructor(filterClass.get(), InputChannels.class, Object[].class);
+            return Optional.of(() -> {
+                try {
+                    return (ColumnarFilter) constructor.invoke(inputChannels, constants);
+                }
+                catch (Throwable throwable) {
+                    throw new TrinoException(COMPILER_ERROR, throwable);
+                }
+            });
         }
         // resolved once: the supplier runs per split, and getConstructor scans the members
         // and copies the Constructor on every call
@@ -268,7 +299,7 @@ public class ColumnarFilterCompiler
                         }
                         yield Optional.empty();
                     }
-                    yield Optional.of(new CallColumnarFilterGenerator(call.function(), call.arguments(), layout, functionManager).generateColumnarFilter(filterTemplates, call));
+                    yield Optional.of(generateCallFilter(new CallColumnarFilterGenerator(call.function(), call.arguments(), layout, functionManager)));
                 }
                 case IsNull isNull -> Optional.of(createIsNullColumnarFilter(isNull));
                 case In in -> Optional.of(new InColumnarFilterGenerator(in, layout, metadata, charVarcharCoercion, functionManager, plannerContext.getTypeOperators()).generateColumnarFilter(filterTemplates, in));
@@ -287,6 +318,21 @@ public class ColumnarFilterCompiler
         }
     }
 
+    // calls, other than the negations handled by dedicated classes, are compiled by CallColumnarFilterGenerator
+    private static boolean isCallFilter(Expression filter)
+    {
+        return filter instanceof Call call && !isNotExpression(call);
+    }
+
+    private Class<? extends ColumnarFilter> generateCallFilter(CallColumnarFilterGenerator generator)
+            throws ExecutionException
+    {
+        if (callFilterCache == null) {
+            return generator.generateColumnarFilter();
+        }
+        return callFilterCache.get(generator.shape(), generator::generateColumnarFilter);
+    }
+
     static FieldDefinition generateGetInputChannels(ClassDefinition classDefinition)
     {
         FieldDefinition inputChannelsField = classDefinition.declareField(a(PRIVATE, FINAL), "inputChannels", InputChannels.class);
@@ -297,11 +343,6 @@ public class ColumnarFilterCompiler
                 .retObject();
 
         return inputChannelsField;
-    }
-
-    static Class<? extends ColumnarFilter> createClassInstance(ClassTemplateCache<ColumnarFilter> templates, Expression filter, Function<CallSiteBinder, ClassDefinition> generator)
-    {
-        return wrapCompilation(() -> templates.defineClass(filter, ImmutableList.of(), generator));
     }
 
     // for a filter the caller already knows can never serve as a template, like an IN list,
