@@ -27,12 +27,14 @@ import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.SortItem;
 import io.trino.spi.expression.ConnectorExpression;
+import io.trino.spi.expression.Constant;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.function.BoundSignature;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.sql.PlannerContext;
 import io.trino.sql.ir.Expression;
 import io.trino.sql.ir.Reference;
+import io.trino.sql.ir.Row;
 import io.trino.sql.planner.ConnectorExpressionTranslator;
 import io.trino.sql.planner.OrderingScheme;
 import io.trino.sql.planner.Symbol;
@@ -42,6 +44,7 @@ import io.trino.sql.planner.plan.Assignments;
 import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.TableScanNode;
+import io.trino.sql.planner.plan.ValuesNode;
 
 import java.util.HashMap;
 import java.util.List;
@@ -164,6 +167,19 @@ public class PushAggregationIntoTableScan
         }
 
         AggregationApplicationResult<TableHandle> result = aggregationPushdownResult.get();
+
+        if (groupingKeys.isEmpty() && result.getAssignments().isEmpty() && result.getProjections().stream().allMatch(Constant.class::isInstance)) {
+            // the connector knows the results of the global aggregation, which produces exactly one row
+            verify(result.getProjections().size() == aggregationOutputSymbols.size());
+            List<Expression> values = result.getProjections().stream()
+                    .map(Constant.class::cast)
+                    .map(constant -> (Expression) new io.trino.sql.ir.Constant(constant.getType(), constant.getValue()))
+                    .collect(toImmutableList());
+            return Optional.of(new ValuesNode(
+                    context.getIdAllocator().getNextId(),
+                    aggregationOutputSymbols,
+                    ImmutableList.of(new Row(values))));
+        }
 
         // The new scan outputs should be the symbols associated with grouping columns plus the symbols associated with aggregations.
         ImmutableList.Builder<Symbol> newScanOutputs = ImmutableList.builder();

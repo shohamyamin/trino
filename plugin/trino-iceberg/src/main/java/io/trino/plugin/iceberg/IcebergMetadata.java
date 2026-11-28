@@ -81,6 +81,8 @@ import io.trino.spi.RefreshType;
 import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.catalog.CatalogName;
+import io.trino.spi.connector.AggregateFunction;
+import io.trino.spi.connector.AggregationApplicationResult;
 import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.BeginTableExecuteResult;
 import io.trino.spi.connector.CatalogSchemaTableName;
@@ -189,6 +191,7 @@ import org.apache.iceberg.SnapshotUpdate;
 import org.apache.iceberg.SortField;
 import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.StatisticsFile;
+import org.apache.iceberg.StructLike;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableProperties;
@@ -205,12 +208,15 @@ import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.exceptions.RESTException;
 import org.apache.iceberg.exceptions.ValidationException;
+import org.apache.iceberg.expressions.AggregateEvaluator;
+import org.apache.iceberg.expressions.Expression.Operation;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.Literal;
 import org.apache.iceberg.expressions.Term;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Type.NestedType;
+import org.apache.iceberg.types.Type.TypeID;
 import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.types.Types.IntegerType;
@@ -361,6 +367,7 @@ import static io.trino.plugin.iceberg.IcebergTableProperties.getPartitioning;
 import static io.trino.plugin.iceberg.IcebergTableProperties.getProperty;
 import static io.trino.plugin.iceberg.IcebergTableProperties.getTableLocation;
 import static io.trino.plugin.iceberg.IcebergTableProperties.validateCompression;
+import static io.trino.plugin.iceberg.IcebergTypes.convertIcebergValueToTrino;
 import static io.trino.plugin.iceberg.IcebergUtil.buildPath;
 import static io.trino.plugin.iceberg.IcebergUtil.canEnforceColumnConstraintInSpecs;
 import static io.trino.plugin.iceberg.IcebergUtil.checkFormatForProperty;
@@ -3956,6 +3963,132 @@ public class IcebergMetadata
                 table.getForAnalyze());
 
         return Optional.of(new LimitApplicationResult<>(table, false, false));
+    }
+
+    @Override
+    public Optional<AggregationApplicationResult<ConnectorTableHandle>> applyAggregation(
+            ConnectorSession session,
+            ConnectorTableHandle handle,
+            List<AggregateFunction> aggregates,
+            Map<String, ColumnHandle> assignments,
+            List<List<ColumnHandle>> groupingSets)
+    {
+        // Global count, min and max are computed from the metrics of the data files when every file
+        // has them, no rows are deleted, and the predicate selects either all or none of the rows of each file
+        IcebergTableHandle table = (IcebergTableHandle) handle;
+        if (!groupingSets.equals(ImmutableList.of(ImmutableList.of())) ||
+                table.getTableType() != DATA ||
+                table.getLimit().isPresent() ||
+                table.getForAnalyze().orElse(false) ||
+                table.isRecordScannedFiles() ||
+                table.getMaxScannedFileSize().isPresent() ||
+                !table.getUnenforcedPredicate().isAll() ||
+                !table.getEnforcedPredicate().filter((column, _) -> column.isMetadataColumn()).isAll()) {
+            return Optional.empty();
+        }
+
+        Schema schema = SchemaParser.fromJson(table.getTableSchemaJson());
+        ImmutableList.Builder<org.apache.iceberg.expressions.Expression> icebergAggregates = ImmutableList.builder();
+        ImmutableList.Builder<Optional<Type>> resultTypes = ImmutableList.builder();
+        Set<String> statisticsColumns = new HashSet<>();
+        for (AggregateFunction aggregate : aggregates) {
+            if (aggregate.isDistinct() || aggregate.getFilter().isPresent() || !aggregate.getSortItems().isEmpty()) {
+                return Optional.empty();
+            }
+            String functionName = aggregate.getFunctionName();
+            if (functionName.equals("count") && aggregate.getArguments().isEmpty()) {
+                icebergAggregates.add(Expressions.countStar());
+                resultTypes.add(Optional.empty());
+                continue;
+            }
+            if (aggregate.getArguments().size() != 1 || !(aggregate.getArguments().getFirst() instanceof Variable variable)) {
+                return Optional.empty();
+            }
+            IcebergColumnHandle column = (IcebergColumnHandle) assignments.get(variable.getName());
+            if (column == null || !column.isBaseColumn() || column.isMetadataColumn()) {
+                return Optional.empty();
+            }
+            NestedField field = schema.findField(column.getId());
+            if (field == null || !field.type().isPrimitiveType()) {
+                return Optional.empty();
+            }
+            String name = schema.findColumnName(column.getId());
+            switch (functionName) {
+                case "count" -> {
+                    // NaN values are counted as values, but not every writer distinguishes them from nulls
+                    if (isFloatingPoint(field.type())) {
+                        return Optional.empty();
+                    }
+                    icebergAggregates.add(Expressions.count(name));
+                    resultTypes.add(Optional.empty());
+                }
+                case "min", "max" -> {
+                    if (!hasExactBounds(field.type())) {
+                        return Optional.empty();
+                    }
+                    icebergAggregates.add(functionName.equals("min") ? Expressions.min(name) : Expressions.max(name));
+                    resultTypes.add(Optional.of(field.type()));
+                }
+                default -> {
+                    return Optional.empty();
+                }
+            }
+            statisticsColumns.add(name);
+        }
+
+        AggregateEvaluator evaluator = AggregateEvaluator.create(schema, icebergAggregates.build());
+        if (table.getSnapshotId().isPresent()) {
+            Table icebergTable = catalog.loadTable(session, table.getSchemaTableName());
+            TableScan tableScan = icebergTable.newScan()
+                    .useSnapshot(table.getSnapshotId().getAsLong())
+                    .filter(toIcebergExpression(table.getEnforcedPredicate()))
+                    .includeColumnStats(statisticsColumns)
+                    .planWith(icebergPlanningExecutor);
+            try (CloseableIterable<FileScanTask> fileScanTasks = tableScan.planFiles()) {
+                for (FileScanTask fileScanTask : fileScanTasks) {
+                    // the metrics of a file describe all of its rows: none may be deleted or filtered out
+                    if (!fileScanTask.deletes().isEmpty() || fileScanTask.residual().op() != Operation.TRUE) {
+                        return Optional.empty();
+                    }
+                    evaluator.update(fileScanTask.file());
+                    if (!evaluator.allAggregatorsValid()) {
+                        return Optional.empty();
+                    }
+                }
+            }
+            catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+
+        StructLike result = evaluator.result();
+        List<Optional<Type>> types = resultTypes.build();
+        ImmutableList.Builder<ConnectorExpression> projections = ImmutableList.builder();
+        for (int i = 0; i < aggregates.size(); i++) {
+            Object value = result.get(i, Object.class);
+            Optional<Type> icebergType = types.get(i);
+            projections.add(new Constant(
+                    icebergType.isPresent() ? convertIcebergValueToTrino(icebergType.get(), value) : value,
+                    aggregates.get(i).getOutputType()));
+        }
+        return Optional.of(new AggregationApplicationResult<>(handle, projections.build(), ImmutableList.of(), ImmutableMap.of(), false));
+    }
+
+    private static boolean isFloatingPoint(Type type)
+    {
+        return type.typeId() == TypeID.FLOAT || type.typeId() == TypeID.DOUBLE;
+    }
+
+    /**
+     * Bounds of these types are the exact minimum and maximum of the file, while bounds of strings and
+     * binaries may be truncated, and floating point bounds do not account for NaN.
+     */
+    private static boolean hasExactBounds(Type type)
+    {
+        return switch (type.typeId()) {
+            case INTEGER, LONG, DATE, DECIMAL, TIMESTAMP -> true;
+            default -> false;
+        };
     }
 
     @Override

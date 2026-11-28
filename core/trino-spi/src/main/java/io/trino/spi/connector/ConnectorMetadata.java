@@ -1613,6 +1613,10 @@ public interface ConnectorMetadata
      *      }
      * }
      * </pre>
+     * <p>
+     * For a global aggregation (a single empty grouping set), a connector that knows the results without scanning the table,
+     * for example from table metadata, can return them as {@link Constant} projections and no assignments. The aggregation
+     * is then replaced with a single row of these values and the table is not scanned.
      */
     default Optional<AggregationApplicationResult<ConnectorTableHandle>> applyAggregation(
             ConnectorSession session,
