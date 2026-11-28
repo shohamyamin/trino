@@ -22,7 +22,6 @@ import io.airlift.bytecode.BytecodeBlock;
 import io.airlift.bytecode.BytecodeNode;
 import io.airlift.bytecode.ClassDefinition;
 import io.airlift.bytecode.CompilationException;
-import io.airlift.bytecode.DynamicClassLoader;
 import io.airlift.bytecode.FieldDefinition;
 import io.airlift.bytecode.MethodDefinition;
 import io.airlift.bytecode.OpCode;
@@ -40,13 +39,8 @@ import io.trino.cache.CacheStatsMBean;
 import io.trino.cache.NonEvictableLoadingCache;
 import io.trino.operator.HashArraySizeSupplier;
 import io.trino.operator.PagesHashStrategy;
-import io.trino.operator.join.BigintPagesHash;
-import io.trino.operator.join.DefaultPagesHash;
-import io.trino.operator.join.JoinHash;
 import io.trino.operator.join.JoinHashSupplier;
 import io.trino.operator.join.LookupSourceSupplier;
-import io.trino.operator.join.PagesHash;
-import io.trino.operator.join.nonspilling.PartitionedLookupSource;
 import io.trino.spi.Page;
 import io.trino.spi.PageBuilder;
 import io.trino.spi.TrinoException;
@@ -211,16 +205,10 @@ public class JoinCompiler
             singleBigintJoinChannel = getSingleBigintJoinChannel(joinChannels, types);
         }
 
-        Class<? extends LookupSourceSupplier> joinHashSupplierClass = IsolatedClass.isolateClass(
-                new DynamicClassLoader(getClass().getClassLoader()),
-                LookupSourceSupplier.class,
-                JoinHashSupplier.class,
-                JoinHash.class,
-                PagesHash.class,
-                BigintPagesHash.class,
-                DefaultPagesHash.class,
-                PartitionedLookupSource.class);
-        return new LookupSourceSupplierFactory(joinHashSupplierClass, new PagesHashStrategyFactory(pagesHashStrategyClass), singleBigintJoinChannel);
+        // JoinHashSupplier and the hash classes are shared by all lookup sources. Isolated
+        // copies per strategy class keep call sites monomorphic, but each copy is loaded,
+        // profiled and JIT compiled again, which delays and adds to compilation work.
+        return new LookupSourceSupplierFactory(JoinHashSupplier.class, new PagesHashStrategyFactory(pagesHashStrategyClass), singleBigintJoinChannel);
     }
 
     private static FieldDefinition generateInstanceSize(ClassDefinition definition)
