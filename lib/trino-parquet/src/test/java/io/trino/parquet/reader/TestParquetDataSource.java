@@ -182,6 +182,29 @@ public class TestParquetDataSource
         assertThat(memoryContext.getBytes()).isEqualTo(50);
     }
 
+    @Test
+    public void testReadsWithinTailAreServedFromTail()
+            throws IOException
+    {
+        Slice testingInput = createTestingInput();
+        TestingParquetDataSource dataSource = new TestingParquetDataSource(testingInput, ParquetReaderOptions.defaultOptions());
+        assertThat(dataSource.readTail(1000)).isEqualTo(testingInput.slice(3000, 1000));
+        long tailReadBytes = dataSource.getReadBytes();
+
+        // ranges within the tail are not read again
+        assertThat(dataSource.readFully(3100, 200)).isEqualTo(testingInput.slice(3100, 200));
+        Map<String, ChunkedInputStream> inputStreams = dataSource.planRead(
+                ImmutableListMultimap.of("1", new DiskRange(3000, 100), "2", new DiskRange(3900, 100)),
+                newSimpleAggregatedMemoryContext());
+        assertThat(inputStreams.get("1").getSlice(100)).isEqualTo(testingInput.slice(3000, 100));
+        assertThat(inputStreams.get("2").getSlice(100)).isEqualTo(testingInput.slice(3900, 100));
+        assertThat(dataSource.getReadBytes()).isEqualTo(tailReadBytes);
+
+        // ranges reaching outside of the tail are read
+        assertThat(dataSource.readFully(2900, 200)).isEqualTo(testingInput.slice(2900, 200));
+        assertThat(dataSource.getReadBytes()).isEqualTo(tailReadBytes + 200);
+    }
+
     private static Slice createTestingInput()
     {
         Slice testingInput = Slices.allocate(4000);
