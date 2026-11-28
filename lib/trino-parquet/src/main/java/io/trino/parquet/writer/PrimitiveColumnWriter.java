@@ -128,7 +128,8 @@ public class PrimitiveColumnWriter
             CompressionBuffers compressionBuffers,
             int pageSizeThreshold,
             int pageValueCountLimit,
-            Optional<BloomFilter> bloomFilter)
+            Optional<BloomFilter> bloomFilter,
+            int zstdCompressionLevel)
     {
         this.columnDescriptor = requireNonNull(columnDescriptor, "columnDescriptor is null");
         this.maxDefinitionLevel = columnDescriptor.getMaxDefinitionLevel();
@@ -136,7 +137,7 @@ public class PrimitiveColumnWriter
         this.repetitionLevelWriter = requireNonNull(repetitionLevelWriter, "repetitionLevelWriter is null");
         this.primitiveValueWriter = requireNonNull(primitiveValueWriter, "primitiveValueWriter is null");
         this.compressionCodec = requireNonNull(compressionCodec, "compressionCodec is null");
-        this.compressor = getCompressor(compressionCodec);
+        this.compressor = getCompressor(compressionCodec, zstdCompressionLevel);
         this.compressionBuffers = requireNonNull(compressionBuffers, "compressionBuffers is null");
         this.pageSizeThreshold = pageSizeThreshold;
         this.pageValueCountLimit = pageValueCountLimit;

@@ -22,6 +22,7 @@ import io.airlift.compress.v3.lz4.Lz4Compressor;
 import io.airlift.compress.v3.lz4.Lz4Decompressor;
 import io.airlift.compress.v3.snappy.SnappyCompressor;
 import io.airlift.compress.v3.zstd.ZstdCompressor;
+import io.airlift.compress.v3.zstd.ZstdNativeCompressor;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceInput;
 import io.airlift.slice.Slices;
@@ -146,6 +147,7 @@ import static io.trino.spi.type.VariantType.VARIANT;
 import static io.trino.type.JsonType.JSON;
 import static java.lang.Float.floatToRawIntBits;
 import static java.lang.Math.toIntExact;
+import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.listType;
 import static org.apache.parquet.schema.LogicalTypeAnnotation.mapType;
@@ -156,6 +158,7 @@ import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT32;
 import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
 import static org.apache.parquet.schema.Type.Repetition.REQUIRED;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class TestParquetWriter
 {
@@ -1068,6 +1071,58 @@ public class TestParquetWriter
             }
         }
         assertThat(readBackBuilder.build()).isEqualTo(sliceValues);
+    }
+
+    @Test
+    public void testZstdCompressionLevel()
+            throws Exception
+    {
+        assumeTrue(ZstdNativeCompressor.isEnabled(), "levels other than the default need the native ZSTD compressor");
+        // values repeat far apart, which higher levels find with longer match searches
+        Random random = new Random(42);
+        List<String> sentences = IntStream.range(0, 2_000)
+                .mapToObj(_ -> IntStream.range(0, 8).mapToObj(_ -> Integer.toHexString(random.nextInt())).collect(joining(" ")))
+                .collect(toImmutableList());
+        List<Slice> values = IntStream.range(0, 50_000)
+                .mapToObj(_ -> Slices.utf8Slice(sentences.get(random.nextInt(sentences.size()))))
+                .collect(toImmutableList());
+        List<String> columnNames = ImmutableList.of("column");
+        List<Type> types = ImmutableList.of(VARCHAR);
+
+        Map<Integer, Integer> sizes = new LinkedHashMap<>();
+        for (int level : new int[] {1, 3, 19}) {
+            ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+            try (ParquetWriter writer = createParquetWriter(
+                    outputStream,
+                    ParquetWriterOptions.builder()
+                            .setZstdCompressionLevel(level)
+                            // no dictionary, so that the data pages are compressed
+                            .setUseDeltaLengthByteArrayEncoding(true)
+                            .build(),
+                    types,
+                    columnNames,
+                    CompressionCodec.ZSTD)) {
+                for (Page page : generateInputPages(types, 1000, values)) {
+                    writer.write(page);
+                }
+            }
+            byte[] file = outputStream.toByteArray();
+            sizes.put(level, file.length);
+
+            ParquetDataSource dataSource = new TestingParquetDataSource(Slices.wrappedBuffer(file), ParquetReaderOptions.defaultOptions());
+            ParquetMetadata parquetMetadata = MetadataReader.readFooter(dataSource, Optional.empty());
+            ImmutableList.Builder<Slice> readBack = ImmutableList.builder();
+            try (ParquetReader reader = createParquetReader(dataSource, parquetMetadata, types, columnNames)) {
+                for (SourcePage page = reader.nextPage(); page != null; page = reader.nextPage()) {
+                    Block block = page.getBlock(0);
+                    for (int i = 0; i < page.getPositionCount(); i++) {
+                        readBack.add(VARCHAR.getSlice(block, i));
+                    }
+                }
+            }
+            assertThat(readBack.build()).isEqualTo(values);
+        }
+        assertThat(sizes.get(19)).isLessThan(sizes.get(1));
     }
 
     @ParameterizedTest

@@ -38,7 +38,8 @@ public class TestParquetWriterConfig
                 .setPageValueCount(ParquetWriterOptions.DEFAULT_MAX_PAGE_VALUE_COUNT)
                 .setBatchSize(ParquetWriterOptions.DEFAULT_BATCH_SIZE)
                 .setValidationPercentage(5)
-                .setDeltaLengthByteArrayEncodingEnabled(true));
+                .setDeltaLengthByteArrayEncodingEnabled(true)
+                .setZstdCompressionLevel(3));
     }
 
     @Test
@@ -51,7 +52,8 @@ public class TestParquetWriterConfig
                 "parquet.writer.page-value-count", "10000",
                 "parquet.writer.batch-size", "100",
                 "parquet.writer.validation-percentage", "10",
-                "parquet.writer.delta-length-byte-array-encoding-enabled", "false");
+                "parquet.writer.delta-length-byte-array-encoding-enabled", "false",
+                "parquet.writer.zstd-compression-level", "12");
 
         ParquetWriterConfig expected = new ParquetWriterConfig()
                 .setRowGroupSize(DataSize.of(234, MEGABYTE))
@@ -60,7 +62,8 @@ public class TestParquetWriterConfig
                 .setPageValueCount(10_000)
                 .setBatchSize(100)
                 .setValidationPercentage(10)
-                .setDeltaLengthByteArrayEncodingEnabled(false);
+                .setDeltaLengthByteArrayEncodingEnabled(false)
+                .setZstdCompressionLevel(12);
 
         assertFullMapping(properties, expected);
 
@@ -71,7 +74,8 @@ public class TestParquetWriterConfig
                 "parquet.writer.page-value-count", "10000",
                 "parquet.writer.batch-size", "100",
                 "parquet.writer.validation-percentage", "10",
-                "parquet.writer.delta-length-byte-array-encoding-enabled", "false");
+                "parquet.writer.delta-length-byte-array-encoding-enabled", "false",
+                "parquet.writer.zstd-compression-level", "12");
         assertDeprecatedEquivalence(ParquetWriterConfig.class, properties, oldProperties);
     }
 }

@@ -17,6 +17,7 @@ import io.airlift.compress.v3.Compressor;
 import io.airlift.compress.v3.lz4.Lz4Compressor;
 import io.airlift.compress.v3.snappy.SnappyCompressor;
 import io.airlift.compress.v3.zstd.ZstdCompressor;
+import io.airlift.compress.v3.zstd.ZstdNativeCompressor;
 import io.airlift.slice.Slices;
 import org.apache.parquet.format.CompressionCodec;
 
@@ -38,12 +39,22 @@ interface ParquetCompressor
     ParquetDataOutput compress(ByteBuffer input, CompressionBuffers buffers)
             throws IOException;
 
+    int DEFAULT_ZSTD_COMPRESSION_LEVEL = 3;
+
     static ParquetCompressor getCompressor(CompressionCodec codec)
+    {
+        return getCompressor(codec, DEFAULT_ZSTD_COMPRESSION_LEVEL);
+    }
+
+    static ParquetCompressor getCompressor(CompressionCodec codec, int zstdCompressionLevel)
     {
         return switch (codec) {
             case GZIP -> new GzipCompressor();
             case SNAPPY -> new AirLiftCompressor(SnappyCompressor.create());
-            case ZSTD -> new AirLiftCompressor(ZstdCompressor.create());
+            // the pure Java compressor supports only the default level
+            case ZSTD -> new AirLiftCompressor(zstdCompressionLevel != DEFAULT_ZSTD_COMPRESSION_LEVEL && ZstdNativeCompressor.isEnabled()
+                    ? ZstdCompressor.create(zstdCompressionLevel)
+                    : ZstdCompressor.create());
             case LZ4 -> new AirLiftCompressor(Lz4Compressor.create());
             case UNCOMPRESSED -> null;
             case LZO, LZ4_RAW, BROTLI -> {

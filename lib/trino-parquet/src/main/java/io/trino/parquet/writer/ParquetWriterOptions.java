@@ -35,6 +35,9 @@ public class ParquetWriterOptions
     public static final DataSize DEFAULT_MAX_BLOOM_FILTER_SIZE = DataSize.of(1, MEGABYTE);
     public static final double DEFAULT_BLOOM_FILTER_FPP = 0.05;
     public static final boolean DEFAULT_USE_DELTA_LENGTH_BYTE_ARRAY_ENCODING = true;
+    public static final int DEFAULT_ZSTD_COMPRESSION_LEVEL = ParquetCompressor.DEFAULT_ZSTD_COMPRESSION_LEVEL;
+    public static final int MIN_ZSTD_COMPRESSION_LEVEL = 1;
+    public static final int MAX_ZSTD_COMPRESSION_LEVEL = 22;
 
     public static ParquetWriterOptions.Builder builder()
     {
@@ -51,6 +54,7 @@ public class ParquetWriterOptions
     // Set of column dot paths to columns with bloom filters
     private final Set<String> bloomFilterColumns;
     private final boolean useDeltaLengthByteArrayEncoding;
+    private final int zstdCompressionLevel;
 
     private ParquetWriterOptions(
             DataSize maxBlockSize,
@@ -61,7 +65,8 @@ public class ParquetWriterOptions
             DataSize maxBloomFilterSize,
             double bloomFilterFpp,
             Set<String> bloomFilterColumns,
-            boolean useDeltaLengthByteArrayEncoding)
+            boolean useDeltaLengthByteArrayEncoding,
+            int zstdCompressionLevel)
     {
         this.maxRowGroupSize = Ints.saturatedCast(maxBlockSize.toBytes());
         this.maxRowGroupRowCount = maxRowGroupRowCount;
@@ -72,6 +77,8 @@ public class ParquetWriterOptions
         this.bloomFilterFpp = bloomFilterFpp;
         this.bloomFilterColumns = ImmutableSet.copyOf(bloomFilterColumns);
         this.useDeltaLengthByteArrayEncoding = useDeltaLengthByteArrayEncoding;
+        this.zstdCompressionLevel = zstdCompressionLevel;
+        checkArgument(zstdCompressionLevel >= MIN_ZSTD_COMPRESSION_LEVEL && zstdCompressionLevel <= MAX_ZSTD_COMPRESSION_LEVEL, "zstdCompressionLevel must be between %s and %s", MIN_ZSTD_COMPRESSION_LEVEL, MAX_ZSTD_COMPRESSION_LEVEL);
         checkArgument(this.maxRowGroupRowCount >= 1, "maxRowGroupRowCount must be at least 1");
         checkArgument(this.bloomFilterFpp > 0.0 && this.bloomFilterFpp < 1.0, "bloomFilterFpp should be > 0.0 & < 1.0");
     }
@@ -121,6 +128,11 @@ public class ParquetWriterOptions
         return useDeltaLengthByteArrayEncoding;
     }
 
+    public int getZstdCompressionLevel()
+    {
+        return zstdCompressionLevel;
+    }
+
     public static class Builder
     {
         private DataSize maxBlockSize = DEFAULT_MAX_ROW_GROUP_SIZE;
@@ -132,6 +144,7 @@ public class ParquetWriterOptions
         private Set<String> bloomFilterColumns = ImmutableSet.of();
         private double bloomFilterFpp = DEFAULT_BLOOM_FILTER_FPP;
         private boolean useDeltaLengthByteArrayEncoding = DEFAULT_USE_DELTA_LENGTH_BYTE_ARRAY_ENCODING;
+        private int zstdCompressionLevel = DEFAULT_ZSTD_COMPRESSION_LEVEL;
 
         public Builder setMaxBlockSize(DataSize maxBlockSize)
         {
@@ -175,6 +188,12 @@ public class ParquetWriterOptions
             return this;
         }
 
+        public Builder setZstdCompressionLevel(int zstdCompressionLevel)
+        {
+            this.zstdCompressionLevel = zstdCompressionLevel;
+            return this;
+        }
+
         public ParquetWriterOptions build()
         {
             return new ParquetWriterOptions(
@@ -186,7 +205,8 @@ public class ParquetWriterOptions
                     maxBloomFilterSize,
                     bloomFilterFpp,
                     bloomFilterColumns,
-                    useDeltaLengthByteArrayEncoding);
+                    useDeltaLengthByteArrayEncoding,
+                    zstdCompressionLevel);
         }
     }
 }

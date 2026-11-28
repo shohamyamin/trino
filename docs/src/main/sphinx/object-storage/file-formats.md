@@ -86,6 +86,13 @@ with Parquet files performed by supported object storage connectors:
   - Use `DELTA_LENGTH_BYTE_ARRAY` encoding for `BYTE_ARRAY` columns when
     the Parquet dictionary encoding is not effective.
   - `true`
+* - `parquet.writer.zstd-compression-level`
+  - Compression level from 1 to 22 of ZSTD compressed Parquet files. Higher
+    levels write smaller files more slowly, the read speed barely changes.
+    Levels other than the default need the native ZSTD library. The equivalent
+    catalog session property in the Iceberg connector is
+    `parquet_writer_zstd_compression_level`.
+  - `3`
 * - `parquet.use-bloom-filter`
   - Whether bloom filters are used for predicate pushdown when reading Parquet
     files. Set this property to `false` to disable the usage of bloom filters by

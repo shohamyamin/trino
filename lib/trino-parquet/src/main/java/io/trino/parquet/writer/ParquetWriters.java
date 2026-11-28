@@ -212,6 +212,7 @@ final class ParquetWriters
         private final CompressionBuffers compressionBuffers;
         private final int maxPageSize;
         private final int pageValueCountLimit;
+        private final int zstdCompressionLevel;
         private final Set<String> bloomFilterColumns;
         private final Optional<DateTimeZone> parquetTimeZone;
         private final ImmutableList.Builder<ColumnWriter> builder = ImmutableList.builder();
@@ -234,6 +235,7 @@ final class ParquetWriters
             this.compressionBuffers = requireNonNull(compressionBuffers, "compressionBuffers is null");
             this.maxPageSize = writerOptions.getMaxPageSize();
             this.pageValueCountLimit = writerOptions.getMaxPageValueCount();
+            this.zstdCompressionLevel = writerOptions.getZstdCompressionLevel();
             this.maxBloomFilterSize = writerOptions.getMaxBloomFilterSize();
             this.bloomFilterColumns = requireNonNull(writerOptions.getBloomFilterColumns(), "bloomFilterColumns is null");
             this.bloomFilterFpp = writerOptions.getBLoomFilterFpp();
@@ -346,7 +348,8 @@ final class ParquetWriters
                     compressionBuffers,
                     maxPageSize,
                     pageValueCountLimit,
-                    bloomFilter);
+                    bloomFilter,
+                    zstdCompressionLevel);
         }
 
         private String[] currentPath()

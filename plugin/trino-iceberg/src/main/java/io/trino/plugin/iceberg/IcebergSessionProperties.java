@@ -38,6 +38,8 @@ import java.util.concurrent.ThreadLocalRandom;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Strings.isNullOrEmpty;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static io.trino.parquet.writer.ParquetWriterOptions.MAX_ZSTD_COMPRESSION_LEVEL;
+import static io.trino.parquet.writer.ParquetWriterOptions.MIN_ZSTD_COMPRESSION_LEVEL;
 import static io.trino.plugin.base.session.PropertyMetadataUtil.dataSizeProperty;
 import static io.trino.plugin.base.session.PropertyMetadataUtil.durationProperty;
 import static io.trino.plugin.base.session.PropertyMetadataUtil.validateMaxDataSize;
@@ -93,6 +95,7 @@ public final class IcebergSessionProperties
     private static final String PARQUET_WRITER_PAGE_VALUE_COUNT = "parquet_writer_page_value_count";
     private static final String PARQUET_WRITER_BATCH_SIZE = "parquet_writer_batch_size";
     private static final String PARQUET_WRITER_DELTA_LENGTH_BYTE_ARRAY_ENCODING_ENABLED = "parquet_writer_delta_length_byte_array_encoding_enabled";
+    private static final String PARQUET_WRITER_ZSTD_COMPRESSION_LEVEL = "parquet_writer_zstd_compression_level";
     public static final String DYNAMIC_FILTERING_WAIT_TIMEOUT = "dynamic_filtering_wait_timeout";
     private static final String STATISTICS_ENABLED = "statistics_enabled";
     private static final String PROJECTION_PUSHDOWN_ENABLED = "projection_pushdown_enabled";
@@ -307,6 +310,18 @@ public final class IcebergSessionProperties
                         PARQUET_WRITER_DELTA_LENGTH_BYTE_ARRAY_ENCODING_ENABLED,
                         "Parquet: Use DELTA_LENGTH_BYTE_ARRAY encoding for binary and string columns",
                         parquetWriterConfig.isDeltaLengthByteArrayEncodingEnabled(),
+                        false))
+                .add(integerProperty(
+                        PARQUET_WRITER_ZSTD_COMPRESSION_LEVEL,
+                        "Parquet: Compression level of ZSTD compressed files",
+                        parquetWriterConfig.getZstdCompressionLevel(),
+                        value -> {
+                            if (value < MIN_ZSTD_COMPRESSION_LEVEL || value > MAX_ZSTD_COMPRESSION_LEVEL) {
+                                throw new TrinoException(
+                                        INVALID_SESSION_PROPERTY,
+                                        format("%s must be between %s and %s: %s", PARQUET_WRITER_ZSTD_COMPRESSION_LEVEL, MIN_ZSTD_COMPRESSION_LEVEL, MAX_ZSTD_COMPRESSION_LEVEL, value));
+                            }
+                        },
                         false))
                 .add(durationProperty(
                         DYNAMIC_FILTERING_WAIT_TIMEOUT,
@@ -568,6 +583,11 @@ public final class IcebergSessionProperties
     public static boolean getParquetWriterDeltaLengthByteArrayEncodingEnabled(ConnectorSession session)
     {
         return session.getProperty(PARQUET_WRITER_DELTA_LENGTH_BYTE_ARRAY_ENCODING_ENABLED, Boolean.class);
+    }
+
+    public static int getParquetWriterZstdCompressionLevel(ConnectorSession session)
+    {
+        return session.getProperty(PARQUET_WRITER_ZSTD_COMPRESSION_LEVEL, Integer.class);
     }
 
     public static boolean useParquetBloomFilter(ConnectorSession session)

@@ -53,6 +53,7 @@ public class ParquetWriterConfig
     private int batchSize = ParquetWriterOptions.DEFAULT_BATCH_SIZE;
     private double validationPercentage = 5;
     private boolean deltaLengthByteArrayEncodingEnabled = true;
+    private int zstdCompressionLevel = ParquetWriterOptions.DEFAULT_ZSTD_COMPRESSION_LEVEL;
 
     @MaxDataSize(PARQUET_WRITER_MAX_ROW_GROUP_SIZE)
     public DataSize getRowGroupSize()
@@ -148,6 +149,21 @@ public class ParquetWriterConfig
     public ParquetWriterConfig setDeltaLengthByteArrayEncodingEnabled(boolean deltaLengthByteArrayEncodingEnabled)
     {
         this.deltaLengthByteArrayEncodingEnabled = deltaLengthByteArrayEncodingEnabled;
+        return this;
+    }
+
+    @Min(ParquetWriterOptions.MIN_ZSTD_COMPRESSION_LEVEL)
+    @Max(ParquetWriterOptions.MAX_ZSTD_COMPRESSION_LEVEL)
+    public int getZstdCompressionLevel()
+    {
+        return zstdCompressionLevel;
+    }
+
+    @Config("parquet.writer.zstd-compression-level")
+    @ConfigDescription("Compression level of ZSTD compressed Parquet files, higher levels write smaller files more slowly")
+    public ParquetWriterConfig setZstdCompressionLevel(int zstdCompressionLevel)
+    {
+        this.zstdCompressionLevel = zstdCompressionLevel;
         return this;
     }
 }
