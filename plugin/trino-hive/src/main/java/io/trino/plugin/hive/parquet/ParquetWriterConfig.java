@@ -53,7 +53,7 @@ public class ParquetWriterConfig
     private int batchSize = ParquetWriterOptions.DEFAULT_BATCH_SIZE;
     private double validationPercentage = 5;
     private boolean deltaLengthByteArrayEncodingEnabled = true;
-    private int zstdCompressionLevel = ParquetWriterOptions.DEFAULT_ZSTD_COMPRESSION_LEVEL;
+    private int zstdCompressionLevel = 12;
 
     @MaxDataSize(PARQUET_WRITER_MAX_ROW_GROUP_SIZE)
     public DataSize getRowGroupSize()
