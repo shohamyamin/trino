@@ -59,6 +59,7 @@ public abstract class AbstractColumnReader<BufferType>
     @Nullable
     protected DictionaryDecoder<BufferType> dictionaryDecoder;
     private boolean produceDictionaryBlock;
+    private boolean producePartialDictionaryBlocks;
 
     public AbstractColumnReader(
             PrimitiveField field,
@@ -87,6 +88,7 @@ public abstract class AbstractColumnReader<BufferType>
             try {
                 dictionaryDecoder = dictionaryDecoderProvider.create(dictionaryPage, isNonNull());
                 produceDictionaryBlock = shouldProduceDictionaryBlock(rowRanges);
+                producePartialDictionaryBlocks = !produceDictionaryBlock && shouldProducePartialDictionaryBlocks(rowRanges);
             }
             finally {
                 pageReader.releaseCurrentPage();
@@ -108,6 +110,16 @@ public abstract class AbstractColumnReader<BufferType>
     protected boolean produceDictionaryBlock()
     {
         return produceDictionaryBlock;
+    }
+
+    /**
+     * Whether the column chunk is only partly dictionary encoded and values read from its
+     * dictionary encoded pages should still be returned as dictionary blocks.
+     * Batches which include values from other pages are returned as flat blocks.
+     */
+    protected boolean producePartialDictionaryBlocks()
+    {
+        return producePartialDictionaryBlocks;
     }
 
     protected ValueDecoder<BufferType> createValueDecoder(ValueDecodersProvider<BufferType> decodersProvider, ParquetEncoding encoding, Slice data)
@@ -199,16 +211,27 @@ public abstract class AbstractColumnReader<BufferType>
         //   2. Number of dictionary entries exceeds a threshold (Integer.MAX_VALUE for parquet-mr by default).
         // Trino dictionary blocks are produced only when the entire column chunk is dictionary encoded
         if (pageReader.hasOnlyDictionaryEncodedPages()) {
-            if (!shouldProduceDictionaryForType(field.getType())) {
-                return false;
-            }
-            requireNonNull(dictionaryDecoder, "dictionaryDecoder is null");
-            // Filtering of parquet pages using column indexes may result in the total number of values read from the
-            // column chunk being lower than the size of the dictionary
-            return filteredRowRanges.map(rowRanges -> rowRanges.getRowCount() > dictionaryDecoder.getDictionarySize())
-                    .orElse(true);
+            return isDictionaryUseful(filteredRowRanges);
         }
         return false;
+    }
+
+    private boolean shouldProducePartialDictionaryBlocks(Optional<FilteredRowRanges> filteredRowRanges)
+    {
+        // The leading pages of a column chunk which fell back to a non-dictionary encoding are still dictionary encoded
+        return !pageReader.hasOnlyDictionaryEncodedPages() && isDictionaryUseful(filteredRowRanges);
+    }
+
+    private boolean isDictionaryUseful(Optional<FilteredRowRanges> filteredRowRanges)
+    {
+        if (!shouldProduceDictionaryForType(field.getType())) {
+            return false;
+        }
+        requireNonNull(dictionaryDecoder, "dictionaryDecoder is null");
+        // Filtering of parquet pages using column indexes may result in the total number of values read from the
+        // column chunk being lower than the size of the dictionary
+        return filteredRowRanges.map(rowRanges -> rowRanges.getRowCount() > dictionaryDecoder.getDictionarySize())
+                .orElse(true);
     }
 
     private static boolean shouldProduceDictionaryForType(Type type)

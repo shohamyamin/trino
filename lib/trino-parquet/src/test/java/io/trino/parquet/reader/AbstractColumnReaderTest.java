@@ -69,6 +69,11 @@ public abstract class AbstractColumnReaderTest
 {
     protected abstract ColumnReader createColumnReader(PrimitiveField field);
 
+    protected boolean producesPartialDictionaryBlocks()
+    {
+        return false;
+    }
+
     @ParameterizedTest
     @MethodSource("io.trino.parquet.reader.TestingColumnReader#dictionaryReadersWithPageVersions")
     public <T> void testSingleValueDictionary(DataPageVersion version, ColumnReaderFormat<T> format)
@@ -456,8 +461,13 @@ public abstract class AbstractColumnReaderTest
         Block actual2 = readBlock(reader, 2); // Mixed
         Block actual3 = readBlock(reader, 2); // Only non-dictionary
 
-        // When there is mix of dictionary and non-dictionary pages, we don't produce DictionaryBlock
-        assertThat(actual1).isNotInstanceOf(DictionaryBlock.class);
+        // When there is mix of dictionary and non-dictionary pages, only batches read entirely from dictionary pages may be DictionaryBlocks
+        if (format.expectsDictionaryBlock() && producesPartialDictionaryBlocks()) {
+            assertThat(actual1).isInstanceOf(DictionaryBlock.class);
+        }
+        else {
+            assertThat(actual1).isNotInstanceOf(DictionaryBlock.class);
+        }
         assertThat(actual2).isNotInstanceOf(DictionaryBlock.class);
         assertThat(actual3).isNotInstanceOf(DictionaryBlock.class);
 
@@ -465,6 +475,80 @@ public abstract class AbstractColumnReaderTest
         format.assertBlock(values1, actual2, 2, 0, 1);
         format.assertBlock(values2, actual2, 0, 1, 1);
         format.assertBlock(values2, actual3, 1, 0, 2);
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.trino.parquet.reader.TestingColumnReader#dictionaryReadersWithPageVersions")
+    public <T> void testMixedNullableDictionaryAndOrdinary(DataPageVersion version, ColumnReaderFormat<T> format)
+            throws IOException
+    {
+        // Create reader
+        PrimitiveField field = createField(format, false);
+        ColumnReader reader = createColumnReader(field);
+        // Write data
+        DictionaryValuesWriter dictionaryWriter = format.getDictionaryWriter();
+        T[] values1 = format.write(dictionaryWriter, new Integer[] {0, null, 1});
+        DataPage page1 = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, false, true, false);
+        T[] values2 = format.resetAndWrite(dictionaryWriter, new Integer[] {null, 2, 1});
+        DataPage page2 = createNullableDataPage(version, RLE_DICTIONARY, dictionaryWriter, field, true, false, false);
+        ValuesWriter writer = format.getValuesWriter(version);
+        T[] values3 = format.resetAndWrite(writer, new Integer[] {5, null, 6, 7});
+        DataPage page3 = createNullableDataPage(version, writer, field, false, true, false, false);
+        T[] values4 = format.resetAndWrite(writer, new Integer[] {null, 8});
+        DataPage page4 = createNullableDataPage(version, writer, field, true, false);
+        DictionaryPage dictionaryPage = getDictionaryPage(dictionaryWriter);
+        // Read and assert
+        reader.setPageReader(getPageReaderMock(List.of(page1, page2, page3, page4), dictionaryPage), Optional.empty());
+        Block actual1 = readBlock(reader, 4); // Only dictionary
+        Block actual2 = readBlock(reader, 4); // Dictionary followed by non-dictionary
+        Block actual3 = readBlock(reader, 4); // Only non-dictionary
+
+        if (format.expectsDictionaryBlock() && producesPartialDictionaryBlocks()) {
+            assertThat(actual1).isInstanceOf(DictionaryBlock.class);
+        }
+        else {
+            assertThat(actual1).isNotInstanceOf(DictionaryBlock.class);
+        }
+        assertThat(actual2).isNotInstanceOf(DictionaryBlock.class);
+        assertThat(actual3).isNotInstanceOf(DictionaryBlock.class);
+
+        format.assertBlock(values1, actual1, 0, 0, 3);
+        format.assertBlock(values2, actual1, 0, 3, 1);
+        format.assertBlock(values2, actual2, 1, 0, 2);
+        format.assertBlock(values3, actual2, 0, 2, 2);
+        format.assertBlock(values3, actual3, 2, 0, 2);
+        format.assertBlock(values4, actual3, 0, 2, 2);
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.trino.parquet.reader.TestingColumnReader#dictionaryReadersWithPageVersions")
+    public <T> void testMixedDictionaryAndOrdinarySelectedPositions(DataPageVersion version, ColumnReaderFormat<T> format)
+            throws IOException
+    {
+        // Create reader
+        PrimitiveField field = createField(format, true);
+        ColumnReader reader = createColumnReader(field);
+        if (!reader.supportsSelectedPositions()) {
+            return;
+        }
+        // Write data
+        DictionaryValuesWriter dictionaryWriter = format.getDictionaryWriter();
+        T[] values1 = format.write(dictionaryWriter, new Integer[] {1, 2, 3});
+        DataPage page1 = createDataPage(version, RLE_DICTIONARY, dictionaryWriter, 3);
+        ValuesWriter writer = format.getValuesWriter(version);
+        T[] values2 = format.resetAndWrite(writer, new Integer[] {4, 5, 6});
+        DataPage page2 = createDataPage(version, writer, 3);
+        DictionaryPage dictionaryPage = getDictionaryPage(dictionaryWriter);
+        // Read and assert
+        reader.setPageReader(getPageReaderMock(List.of(page1, page2), dictionaryPage), Optional.empty());
+        reader.prepareNextRead(6);
+        Block actual = reader.readPrimitive(new int[] {0, 2, 4}, 0, 3).getBlock();
+
+        assertThat(actual).isNotInstanceOf(DictionaryBlock.class);
+        assertThat(actual.getPositionCount()).isEqualTo(3);
+        format.assertBlock(values1, actual, 0, 0, 1);
+        format.assertBlock(values1, actual, 2, 1, 1);
+        format.assertBlock(values2, actual, 1, 2, 1);
     }
 
     @ParameterizedTest

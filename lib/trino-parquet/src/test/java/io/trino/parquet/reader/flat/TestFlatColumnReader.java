@@ -87,6 +87,12 @@ public class TestFlatColumnReader
         return columnReader;
     }
 
+    @Override
+    protected boolean producesPartialDictionaryBlocks()
+    {
+        return true;
+    }
+
     @Test
     public void testReadPageV1BitPacked()
             throws IOException
