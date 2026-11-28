@@ -910,6 +910,11 @@ public class TrinoRestCatalog
     @Override
     public Optional<ConnectorViewDefinition> getView(ConnectorSession session, SchemaTableName viewName)
     {
+        if (viewEndpointsEnabled && !caseInsensitiveNameMatching && isTable(session, viewName)) {
+            // Tables and views share one namespace in the REST catalog, so a name that loads as a table is not a view.
+            // With case-insensitive matching, a table and a view with different remote names can map to the same name.
+            return Optional.empty();
+        }
         return getIcebergView(session, viewName, false).flatMap(view -> {
             SQLViewRepresentation sqlView = view.sqlFor("trino");
             if (!sqlView.dialect().equalsIgnoreCase("trino")) {
@@ -928,6 +933,22 @@ public class TrinoRestCatalog
             Optional<String> owner = Optional.ofNullable(view.properties().get(ICEBERG_VIEW_RUN_AS_OWNER));
             return Optional.of(new ConnectorViewDefinition(sqlView.sql(), catalog, schema, viewColumns, comment, owner, owner.isEmpty(), null));
         });
+    }
+
+    /**
+     * Resolving a relation name looks up a view before the table. Probing the table first through the
+     * per-transaction table cache saves the failing view request for every table reference, and the
+     * loaded table is reused when the table handle is created. Any failure falls back to the view lookup.
+     */
+    private boolean isTable(ConnectorSession session, SchemaTableName name)
+    {
+        try {
+            loadTable(session, name);
+            return true;
+        }
+        catch (RuntimeException _) {
+            return false;
+        }
     }
 
     @Override

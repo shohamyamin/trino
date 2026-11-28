@@ -134,9 +134,8 @@ public class TestIcebergTrinoRestCatalogConnectorSmokeTest
         assertThat(((DistributionSnapshot) metrics.get("metastore.all.time.distribution")).total()).isGreaterThan(0);
         assertThat(((LongCount) metrics.get("metastore.loadTable.time.total")).getTotal()).isGreaterThan(0);
         assertThat(((DistributionSnapshot) metrics.get("metastore.loadTable.time.distribution")).total()).isEqualTo(2);
-        // view lookups that miss are not failures
-        assertThat(((DistributionSnapshot) metrics.get("metastore.loadView.time.distribution")).total()).isGreaterThan(0);
-        assertThat(metrics).doesNotContainKeys("metastore.all.failures", "metastore.loadView.failures");
+        // names that load as tables are not looked up as views
+        assertThat(metrics).doesNotContainKeys("metastore.loadView.time.distribution", "metastore.all.failures", "metastore.loadView.failures");
     }
 
     @Test
