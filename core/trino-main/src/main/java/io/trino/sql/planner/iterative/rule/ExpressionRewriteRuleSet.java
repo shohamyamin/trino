@@ -16,10 +16,13 @@ package io.trino.sql.planner.iterative.rule;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.MapMaker;
 import io.trino.Session;
 import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
+import io.trino.sql.ir.Constant;
 import io.trino.sql.ir.Expression;
+import io.trino.sql.ir.Reference;
 import io.trino.sql.ir.Row;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolsExtractor;
@@ -41,6 +44,7 @@ import io.trino.sql.planner.rowpattern.ScalarValuePointer;
 import io.trino.sql.planner.rowpattern.ValuePointer;
 import io.trino.sql.planner.rowpattern.ir.IrLabel;
 
+import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Set;
@@ -73,8 +77,35 @@ public class ExpressionRewriteRuleSet
 
     public ExpressionRewriteRuleSet(ExpressionRewriter rewriter, Predicate<Session> enabled)
     {
-        this.rewriter = requireNonNull(rewriter, "rewriter is null");
+        this.rewriter = skipUnchanged(requireNonNull(rewriter, "rewriter is null"));
         this.enabled = requireNonNull(enabled, "enabled is null");
+    }
+
+    /**
+     * The rules of a set are applied to every plan node of their type by each optimizer that contains them,
+     * and the expressions of a node mostly survive unchanged from one optimizer to the next. Rewriting an
+     * expression that the rewriter already left unchanged is wasted work, so such expressions are remembered,
+     * by identity, together with the session they were rewritten for. The rewrite depends only on the
+     * expression, the session and the symbol types of the query, which do not change during planning.
+     */
+    private static ExpressionRewriter skipUnchanged(ExpressionRewriter rewriter)
+    {
+        Map<Expression, Session> unchanged = new MapMaker().weakKeys().makeMap();
+        return (expression, context) -> {
+            if (expression instanceof Constant || expression instanceof Reference) {
+                // cheap to rewrite, and constants may be shared between queries
+                return rewriter.rewrite(expression, context);
+            }
+            Session session = context.getSession();
+            if (unchanged.get(expression) == session) {
+                return expression;
+            }
+            Expression rewritten = rewriter.rewrite(expression, context);
+            if (rewritten.equals(expression)) {
+                unchanged.put(expression, session);
+            }
+            return rewritten;
+        };
     }
 
     public Set<Rule<?>> rules()
