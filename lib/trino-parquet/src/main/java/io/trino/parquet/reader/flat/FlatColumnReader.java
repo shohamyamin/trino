@@ -584,6 +584,9 @@ public class FlatColumnReader<BufferType>
         if (produceDictionaryBlock()) {
             return new DictionaryValuesBuffer<>(field, dictionaryDecoder, batchSize);
         }
+        if (producePartialDictionaryBlocks()) {
+            return new PartialDictionaryValuesBuffer<>(field, dictionaryDecoder, columnAdapter, batchSize);
+        }
         return new DataValuesBuffer<>(field, columnAdapter, batchSize);
     }
 
@@ -591,6 +594,9 @@ public class FlatColumnReader<BufferType>
     {
         if (produceDictionaryBlock()) {
             return new DictionaryValuesBuffer<>(field, dictionaryDecoder, batchSize);
+        }
+        if (producePartialDictionaryBlocks()) {
+            return new PartialDictionaryValuesBuffer<>(field, dictionaryDecoder, columnAdapter, batchSize);
         }
         return new DataValuesBuffer<>(field, columnAdapter, batchSize);
     }
@@ -747,6 +753,89 @@ public class FlatColumnReader<BufferType>
                 return new ColumnChunk(RunLengthEncodedBlock.create(type, null, batchSize), EMPTY_DEFINITION_LEVELS, EMPTY_REPETITION_LEVELS);
             }
             return createDictionaryBlock(ids, decoder.getDictionaryBlock(), EMPTY_DEFINITION_LEVELS, EMPTY_REPETITION_LEVELS);
+        }
+    }
+
+    /**
+     * Returns a dictionary block when all values of the batch come from dictionary encoded pages,
+     * otherwise a flat block. Used for column chunks which are only partly dictionary encoded.
+     */
+    private static final class PartialDictionaryValuesBuffer<T>
+            implements NonNullValuesBuffer<T>, NullableValuesBuffer<T>
+    {
+        private final PrimitiveField field;
+        private final DictionaryDecoder<T> decoder;
+        private final ColumnAdapter<T> columnAdapter;
+        private final int batchSize;
+        private DictionaryValuesBuffer<T> dictionaryValues;
+        private DataValuesBuffer<T> dataValues;
+
+        private PartialDictionaryValuesBuffer(PrimitiveField field, DictionaryDecoder<T> dictionaryDecoder, ColumnAdapter<T> columnAdapter, int batchSize)
+        {
+            this.field = field;
+            this.decoder = dictionaryDecoder;
+            this.columnAdapter = columnAdapter;
+            this.batchSize = batchSize;
+        }
+
+        @Override
+        public void readNonNullValues(ValueDecoder<T> valueDecoder, int offset, int valuesCount)
+        {
+            if (dataValues == null && valueDecoder == decoder) {
+                dictionaryValues().readNonNullValues(valueDecoder, offset, valuesCount);
+                return;
+            }
+            dataValues(offset).readNonNullValues(valueDecoder, offset, valuesCount);
+        }
+
+        @Override
+        public void readNullableValues(ValueDecoder<T> valueDecoder, long[] valueIsValid, int offset, int nonNullCount, int valuesCount)
+        {
+            if (dataValues == null && valueDecoder == decoder) {
+                dictionaryValues().readNullableValues(valueDecoder, valueIsValid, offset, nonNullCount, valuesCount);
+                return;
+            }
+            dataValues(offset).readNullableValues(valueDecoder, valueIsValid, offset, nonNullCount, valuesCount);
+        }
+
+        @Override
+        public ColumnChunk createNonNullBlock(Type type)
+        {
+            if (dataValues == null) {
+                return dictionaryValues().createNonNullBlock(type);
+            }
+            return dataValues.createNonNullBlock(type);
+        }
+
+        @Override
+        public ColumnChunk createNullableBlock(long[] valueIsValid, Type type)
+        {
+            if (dataValues == null) {
+                return dictionaryValues().createNullableBlock(valueIsValid, type);
+            }
+            return dataValues.createNullableBlock(valueIsValid, type);
+        }
+
+        private DictionaryValuesBuffer<T> dictionaryValues()
+        {
+            if (dictionaryValues == null) {
+                dictionaryValues = new DictionaryValuesBuffer<>(field, decoder, batchSize);
+            }
+            return dictionaryValues;
+        }
+
+        private DataValuesBuffer<T> dataValues(int offset)
+        {
+            if (dataValues == null) {
+                // Values read so far are dictionary ids, materialize them before reading from a non-dictionary page
+                dataValues = new DataValuesBuffer<>(field, columnAdapter, batchSize);
+                if (dictionaryValues != null) {
+                    decoder.decodeDictionaryIds(dataValues.values, 0, dictionaryValues.ids, offset);
+                    dataValues.totalNullsCount = dictionaryValues.totalNullsCount;
+                    dictionaryValues = null;
+                }
+            }
+            return dataValues;
         }
     }
 }

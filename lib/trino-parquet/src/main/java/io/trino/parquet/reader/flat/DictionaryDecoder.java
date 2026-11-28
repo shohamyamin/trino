@@ -78,6 +78,19 @@ public final class DictionaryDecoder<T>
         dictionaryIdsReader.read(ids, offset, length);
     }
 
+    /**
+     * Writes the dictionary values of {@code ids} into {@code values} starting at {@code offset}.
+     * The id {@link #getDictionarySize()} denotes a null and produces an empty value.
+     */
+    public void decodeDictionaryIds(T values, int offset, int[] ids, int length)
+    {
+        if (!isNonNull) {
+            // Initializes the trailing null entry of the dictionary
+            getDictionaryBlock();
+        }
+        columnAdapter.decodeDictionaryIds(values, offset, length, ids, dictionary);
+    }
+
     public Block getDictionaryBlock()
     {
         if (dictionaryBlock == null) {
