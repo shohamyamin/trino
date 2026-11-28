@@ -39,6 +39,10 @@ import static io.trino.parquet.ParquetEncoding.PLAIN_DICTIONARY;
 import static io.trino.parquet.ParquetEncoding.RLE_DICTIONARY;
 import static io.trino.parquet.reader.flat.RowRangesIterator.createRowRangesIterator;
 import static io.trino.spi.block.Bitmap.getBits;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TinyintType.TINYINT;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.util.Arrays.fill;
@@ -48,6 +52,7 @@ public abstract class AbstractColumnReader<BufferType>
         implements ColumnReader
 {
     private static final Logger log = Logger.get(AbstractColumnReader.class);
+    private static final int MAX_INTEGER_DICTIONARY_SIZE = 4096;
 
     protected final PrimitiveField field;
     protected final ValueDecodersProvider<BufferType> decodersProvider;
@@ -199,10 +204,10 @@ public abstract class AbstractColumnReader<BufferType>
         //   2. Number of dictionary entries exceeds a threshold (Integer.MAX_VALUE for parquet-mr by default).
         // Trino dictionary blocks are produced only when the entire column chunk is dictionary encoded
         if (pageReader.hasOnlyDictionaryEncodedPages()) {
-            if (!shouldProduceDictionaryForType(field.getType())) {
+            requireNonNull(dictionaryDecoder, "dictionaryDecoder is null");
+            if (!shouldProduceDictionaryForType(field.getType(), dictionaryDecoder.getDictionarySize())) {
                 return false;
             }
-            requireNonNull(dictionaryDecoder, "dictionaryDecoder is null");
             // Filtering of parquet pages using column indexes may result in the total number of values read from the
             // column chunk being lower than the size of the dictionary
             return filteredRowRanges.map(rowRanges -> rowRanges.getRowCount() > dictionaryDecoder.getDictionarySize())
@@ -211,11 +216,15 @@ public abstract class AbstractColumnReader<BufferType>
         return false;
     }
 
-    private static boolean shouldProduceDictionaryForType(Type type)
+    private static boolean shouldProduceDictionaryForType(Type type, int dictionarySize)
     {
-        // TODO: DictionaryBlocks are currently restricted to variable width and date types where dictionary processing is most beneficial.
-        //   Dictionary processing for other data types can be enabled after validating improvements on benchmarks.
-        return type instanceof VariableWidthType || type instanceof DateType;
+        // DictionaryBlocks are restricted to the types where dictionary processing is most beneficial.
+        // Integer values are cheap to materialize, so they are kept in dictionary form only when the dictionary is small:
+        // filters and projections on them are then evaluated once per distinct value instead of once per row.
+        if (type instanceof VariableWidthType || type instanceof DateType) {
+            return true;
+        }
+        return (type == BIGINT || type == INTEGER || type == SMALLINT || type == TINYINT) && dictionarySize <= MAX_INTEGER_DICTIONARY_SIZE;
     }
 
     private static long getMaxDictionaryBlockSize(Block dictionary, long batchSize)
