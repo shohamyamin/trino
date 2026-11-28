@@ -27,7 +27,7 @@ public class ParquetReaderOptions
     private static final DataSize DEFAULT_MAX_MERGE_DISTANCE = DataSize.of(1, MEGABYTE);
     private static final DataSize DEFAULT_MAX_BUFFER_SIZE = DataSize.of(8, MEGABYTE);
     private static final DataSize DEFAULT_SMALL_FILE_THRESHOLD = DataSize.of(3, MEGABYTE);
-    public static final DataSize DEFAULT_FOOTER_READ_SIZE = DataSize.of(48, KILOBYTE);
+    public static final DataSize DEFAULT_FOOTER_READ_SIZE = DataSize.of(256, KILOBYTE);
     private static final DataSize DEFAULT_MAX_FOOTER_READ_SIZE = DataSize.of(15, MEGABYTE);
     private static final DataSize DEFAULT_MAX_PAGE_READ_SIZE = DataSize.of(500, MEGABYTE);
 

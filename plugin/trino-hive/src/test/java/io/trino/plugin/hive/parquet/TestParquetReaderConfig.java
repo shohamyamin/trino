@@ -41,7 +41,7 @@ public class TestParquetReaderConfig
                 .setSmallFileThreshold(DataSize.of(3, MEGABYTE))
                 .setSelectedPositionsPushdownEnabled(true)
                 .setVectorizedDecodingEnabled(true)
-                .setFooterReadSize(DataSize.of(48, KILOBYTE))
+                .setFooterReadSize(DataSize.of(256, KILOBYTE))
                 .setMaxFooterReadSize(DataSize.of(15, MEGABYTE))
                 .setMaxPageReadSize(DataSize.of(500, MEGABYTE)));
     }

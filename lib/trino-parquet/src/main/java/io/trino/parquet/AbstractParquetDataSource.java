@@ -45,11 +45,17 @@ import static java.util.Objects.requireNonNull;
 public abstract class AbstractParquetDataSource
         implements ParquetDataSource
 {
+    private static final int MAX_RETAINED_TAIL_SIZE = 1024 * 1024;
+
     private final ParquetDataSourceId id;
     private final long estimatedSize;
     private final ParquetReaderOptions options;
     private long readTimeNanos;
     private long readBytes;
+    // The last tail of the file that was read, usually to get the footer. Indexes stored
+    // just before the footer, such as the column and offset indexes, are often in it.
+    private Slice tail;
+    private long tailOffset;
 
     protected AbstractParquetDataSource(ParquetDataSourceId id, long estimatedSize, ParquetReaderOptions options)
     {
@@ -103,6 +109,10 @@ public abstract class AbstractParquetDataSource
         readTimeNanos += System.nanoTime() - start;
         readBytes += tailSlice.length();
 
+        if (tailSlice.length() <= MAX_RETAINED_TAIL_SIZE) {
+            tail = tailSlice;
+            tailOffset = estimatedSize - tailSlice.length();
+        }
         return tailSlice;
     }
 
@@ -118,6 +128,10 @@ public abstract class AbstractParquetDataSource
     private void readFully(long position, byte[] buffer, int bufferOffset, int bufferLength)
             throws IOException
     {
+        if (tail != null && position >= tailOffset && position + bufferLength <= tailOffset + tail.length()) {
+            tail.getBytes(toIntExact(position - tailOffset), buffer, bufferOffset, bufferLength);
+            return;
+        }
         long start = System.nanoTime();
 
         readInternal(position, buffer, bufferOffset, bufferLength);
