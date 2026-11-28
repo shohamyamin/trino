@@ -13,6 +13,8 @@
  */
 package io.trino.parquet.reader;
 
+import com.google.common.collect.Iterators;
+import com.google.common.collect.PeekingIterator;
 import io.airlift.slice.BasicSliceInput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
@@ -23,7 +25,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.util.Collection;
-import java.util.Iterator;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
@@ -41,7 +42,8 @@ import static java.util.Objects.requireNonNull;
 public final class ChunkedInputStream
         extends InputStream
 {
-    private final Iterator<? extends ChunkReader> chunks;
+    private final ChunkReader firstChunk;
+    private final PeekingIterator<? extends ChunkReader> chunks;
     private ChunkReader currentChunkReader;
     // current is explicitly initialized to EMPTY_SLICE as this field is set to null when the stream is closed
     private BasicSliceInput current = EMPTY_SLICE.getInput();
@@ -50,7 +52,18 @@ public final class ChunkedInputStream
     {
         requireNonNull(chunks, "chunks is null");
         checkArgument(!chunks.isEmpty(), "At least one chunk is expected but got none");
-        this.chunks = chunks.iterator();
+        this.firstChunk = chunks.iterator().next();
+        this.chunks = Iterators.peekingIterator(chunks.iterator());
+    }
+
+    /**
+     * Starts loading the first chunk in the background, if the stream has not been read yet.
+     */
+    public void prefetch()
+    {
+        if (current != null && currentChunkReader == null) {
+            firstChunk.prefetch();
+        }
     }
 
     public Slice getSlice(int length)
@@ -148,6 +161,10 @@ public final class ChunkedInputStream
             currentChunkReader.free();
         }
         currentChunkReader = chunks.next();
+        if (chunks.hasNext()) {
+            // load the next chunk in the background while this one is decoded
+            chunks.peek().prefetch();
+        }
         Slice slice = currentChunkReader.readUnchecked();
         checkArgument(slice.length() > 0, "all chunks have to be not empty");
         current = slice.getInput();

@@ -23,21 +23,33 @@ import io.trino.plugin.base.metrics.FileFormatDataSourceStats;
 import io.trino.spi.metrics.Metrics;
 
 import java.io.IOException;
+import java.util.Optional;
+import java.util.concurrent.Executor;
 
 import static java.util.Objects.requireNonNull;
 
 public class TrinoParquetDataSource
         extends AbstractParquetDataSource
 {
+    private final TrinoInputFile file;
     private final FileFormatDataSourceStats stats;
     private final TrinoInput input;
+    private final Optional<Executor> prefetchExecutor;
 
     public TrinoParquetDataSource(TrinoInputFile file, ParquetReaderOptions options, FileFormatDataSourceStats stats)
             throws IOException
     {
+        this(file, options, stats, Optional.empty());
+    }
+
+    public TrinoParquetDataSource(TrinoInputFile file, ParquetReaderOptions options, FileFormatDataSourceStats stats, Optional<Executor> prefetchExecutor)
+            throws IOException
+    {
         super(new ParquetDataSourceId(file.location().toString()), file.length(), options);
+        this.file = file;
         this.stats = requireNonNull(stats, "stats is null");
         this.input = file.newInput();
+        this.prefetchExecutor = requireNonNull(prefetchExecutor, "prefetchExecutor is null");
     }
 
     @Override
@@ -63,6 +75,24 @@ public class TrinoParquetDataSource
     {
         long readStart = System.nanoTime();
         input.readFully(position, buffer, bufferOffset, bufferLength);
+        stats.readDataBytesPerSecond(bufferLength, System.nanoTime() - readStart);
+    }
+
+    @Override
+    protected Optional<Executor> getPrefetchExecutor()
+    {
+        return prefetchExecutor;
+    }
+
+    @Override
+    protected void readInternalConcurrently(long position, byte[] buffer, int bufferOffset, int bufferLength)
+            throws IOException
+    {
+        // a TrinoInput is not required to support concurrent reads, so use a separate one
+        long readStart = System.nanoTime();
+        try (TrinoInput concurrentInput = file.newInput()) {
+            concurrentInput.readFully(position, buffer, bufferOffset, bufferLength);
+        }
         stats.readDataBytesPerSecond(bufferLength, System.nanoTime() - readStart);
     }
 

@@ -210,9 +210,9 @@ implementation is used:
     coordinator. This cache is not used when `fs.cache.enabled` is set to true.
   - `true`
 * - `iceberg.parquet-footer-cache.type`
-  - Type of cache to use for Parquet file footers. Set to `memory` to enable a
-    bounded, in-memory cache.
-  - `none`
+  - Type of cache to use for Parquet file footers. The default `memory` uses a
+    bounded, in-memory cache on each node. Set to `none` to disable the cache.
+  - `memory`
 * - `iceberg.parquet-footer-cache.memory.max-size`
   - Maximum size of the in-memory Parquet footer cache.
   - `10MB`

@@ -43,6 +43,7 @@ public class IcebergExecutorModule
         closingBinder(binder).registerExecutor(Key.get(ExecutorService.class, ForIcebergSplitManager.class));
         closingBinder(binder).registerExecutor(Key.get(ExecutorService.class, ForIcebergPlanning.class));
         closingBinder(binder).registerExecutor(Key.get(ExecutorService.class, ForIcebergDeleteLoading.class));
+        closingBinder(binder).registerExecutor(Key.get(ExecutorService.class, ForIcebergParquetPrefetch.class));
     }
 
     @Singleton
@@ -115,5 +116,15 @@ public class IcebergExecutorModule
         }
         // Delete loading only opens delete files and is primarily I/O bound; parallelism is bounded by BoundedExecutor
         return newThreadPerTaskExecutor(virtualThreadsNamed("iceberg-delete-loading-" + catalogName + "#v%s"));
+    }
+
+    @Provides
+    @Singleton
+    @ForIcebergParquetPrefetch
+    public ExecutorService createParquetPrefetchExecutor(CatalogName catalogName)
+    {
+        // Background reads of Parquet column chunks are blocking object store I/O, and their parallelism
+        // is bounded by BoundedExecutor in IcebergPageSourceProviderFactory
+        return newThreadPerTaskExecutor(virtualThreadsNamed("iceberg-parquet-prefetch-" + catalogName + "#v%s"));
     }
 }

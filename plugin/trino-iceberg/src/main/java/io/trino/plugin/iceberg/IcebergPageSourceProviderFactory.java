@@ -28,14 +28,18 @@ import io.trino.spi.connector.ConnectorPageSourceProviderFactory;
 import io.trino.spi.connector.MemoryContext;
 import io.trino.spi.type.TypeManager;
 
+import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 
+import static java.lang.Math.clamp;
 import static java.util.Objects.requireNonNull;
 
 public class IcebergPageSourceProviderFactory
         implements ConnectorPageSourceProviderFactory
 {
+    private static final int PARQUET_PREFETCH_PARALLELISM = clamp(8L * Runtime.getRuntime().availableProcessors(), 32, 256);
+
     private final IcebergFileSystemFactory fileSystemFactory;
     private final ForwardingFileIoFactory fileIoFactory;
     private final FileFormatDataSourceStats fileFormatDataSourceStats;
@@ -47,6 +51,7 @@ public class IcebergPageSourceProviderFactory
     private final EncryptionManagerFactory encryptionManagerFactory;
     private final int domainCompactionThreshold;
     private final Executor deleteLoadingExecutor;
+    private final Executor parquetPrefetchExecutor;
 
     @Inject
     public IcebergPageSourceProviderFactory(
@@ -60,7 +65,8 @@ public class IcebergPageSourceProviderFactory
             BlocksHashFactory blocksHashFactory,
             IcebergConfig config,
             EncryptionManagerFactory encryptionManagerFactory,
-            @ForIcebergDeleteLoading ExecutorService deleteLoadingExecutor)
+            @ForIcebergDeleteLoading ExecutorService deleteLoadingExecutor,
+            @ForIcebergParquetPrefetch ExecutorService parquetPrefetchExecutor)
     {
         this.fileSystemFactory = requireNonNull(fileSystemFactory, "fileSystemFactory is null");
         this.fileIoFactory = requireNonNull(fileIoFactory, "fileIoFactory is null");
@@ -79,11 +85,13 @@ public class IcebergPageSourceProviderFactory
         else {
             this.deleteLoadingExecutor = new BoundedExecutor(deleteLoadingExecutor, config.getDeleteLoadingParallelism());
         }
+        // bound the number of concurrent background reads, which each hold an object store connection
+        this.parquetPrefetchExecutor = new BoundedExecutor(requireNonNull(parquetPrefetchExecutor, "parquetPrefetchExecutor is null"), PARQUET_PREFETCH_PARALLELISM);
     }
 
     @Override
     public IcebergPageSourceProvider createPageSourceProvider(MemoryContext memoryContext)
     {
-        return new IcebergPageSourceProvider(fileSystemFactory, fileIoFactory, fileFormatDataSourceStats, orcReaderOptions, parquetReaderOptions, typeManager, parquetFooterCache, blocksHashFactory, encryptionManagerFactory, memoryContext, domainCompactionThreshold, deleteLoadingExecutor);
+        return new IcebergPageSourceProvider(fileSystemFactory, fileIoFactory, fileFormatDataSourceStats, orcReaderOptions, parquetReaderOptions, typeManager, parquetFooterCache, blocksHashFactory, encryptionManagerFactory, memoryContext, domainCompactionThreshold, deleteLoadingExecutor, Optional.of(parquetPrefetchExecutor));
     }
 }

@@ -36,4 +36,9 @@ public interface ChunkReader
     }
 
     void free();
+
+    /**
+     * Starts loading the data in the background, if supported. A later {@link #read()} waits for it.
+     */
+    default void prefetch() {}
 }
